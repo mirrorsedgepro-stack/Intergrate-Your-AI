@@ -2,7 +2,7 @@
   "name": "nexus-terminal",
   "productName": "Nexus",
   "version": "1.3.0",
-  "description": "One terminal to orchestrate Claude, Antigravity and shells across your machines (Windows, macOS, Linux, WSL)",
+  "description": "One terminal to orchestrate Claude, Antigravity, OpenClaw and shells across your machines (Windows, macOS, Linux, WSL)",
   "main": "main.js",
   "private": true,
   "scripts": {
@@ -115,7 +115,7 @@
       "icon": "assets/icon-1024.png",
       "category": "Development",
       "maintainer": "mirrorsedgepro-stack",
-      "synopsis": "One terminal for Claude, Antigravity and shells across your machines"
+      "synopsis": "One terminal for Claude, Antigravity, OpenClaw and shells across your machines"
     },
     "deb": {
       "depends": [

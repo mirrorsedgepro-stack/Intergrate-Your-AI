@@ -5,7 +5,7 @@ const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const { sessionCommand, shq, shPath } = require('../lib/remote');
-const { migrate, DEFAULTS } = require('../lib/config');
+const { merge, migrate, DEFAULTS } = require('../lib/config');
 
 // A POSIX bash to run generated commands (Linux CI, or Git Bash on Windows).
 const BASH = process.platform === 'win32'
@@ -50,6 +50,25 @@ test('config migrate swaps the old Gemini preset for Antigravity once', () => {
   assert.strictEqual(cfg.presets[1].id, 'antigravity');
   assert.strictEqual(cfg.presets[1].cmd.linux, 'agy');
   assert.strictEqual(migrate(cfg), false);
+});
+
+test('config migrate adds OpenClaw to an older config once, before the shells', () => {
+  // A v1.3.0 config: saved presets without OpenClaw, merged over the current defaults (arrays are replaced).
+  const old = { presets: DEFAULTS.presets.filter((p) => p.id !== 'openclaw') };
+  const cfg = merge(JSON.parse(JSON.stringify(DEFAULTS)), JSON.parse(JSON.stringify(old)));
+  assert.strictEqual(migrate(cfg), true);
+  const ids = cfg.presets.map((p) => p.id);
+  assert.deepStrictEqual(ids.slice(0, 4), ['claude', 'antigravity', 'openclaw', 'shell']);
+  assert.strictEqual(cfg.presets[2].cmd.linux, 'openclaw tui');
+  assert.strictEqual(migrate(cfg), false);
+  // Deleted by the user afterwards: it stays deleted.
+  cfg.presets = cfg.presets.filter((p) => p.id !== 'openclaw');
+  assert.strictEqual(migrate(cfg), false);
+  assert.ok(!cfg.presets.some((p) => p.id === 'openclaw'));
+  // A fresh config already has it and is only marked.
+  const fresh = JSON.parse(JSON.stringify(DEFAULTS));
+  migrate(fresh);
+  assert.strictEqual(fresh.presets.filter((p) => p.id === 'openclaw').length, 1);
 });
 
 test('Claude alert hooks: added once, existing settings preserved', () => {

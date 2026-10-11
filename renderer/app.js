@@ -90,7 +90,7 @@
   const isVisible = (s) => S.panes.includes(s.id);
   // Brand logos (assets/icons; credits in README). Presets/machines may name one via an `icon` field.
   const LOGO = {
-    claude: 'claude.svg', antigravity: 'google-antigravity.png', gitbash: 'git.svg', git: 'git.svg', apple: 'apple.svg', ubuntu: 'ubuntu.svg',
+    claude: 'claude.svg', antigravity: 'google-antigravity.png', openclaw: 'openclaw.svg', gitbash: 'git.svg', git: 'git.svg', apple: 'apple.svg', ubuntu: 'ubuntu.svg',
     powershell: 'powershell.svg', terminal: 'terminal.svg', windows: 'windows.svg', linux: 'linux.svg', nvidia: 'nvidia.svg',
   };
   const logo = (k) => `<img class="logo" src="../assets/icons/${LOGO[k]}" alt="" draggable="false">`;
@@ -108,7 +108,8 @@
   }
   const mIcon = (m) => logo(machineIconKey(m));
   const presetFromTmux = (name) => { const m = /^nx-([a-z0-9]+)-/.exec(name); return m ? m[1] : 'shell'; };
-  const isAgent = (s) => s.presetId === 'claude' || s.presetId === 'antigravity';
+  const AGENTS = new Set(['claude', 'antigravity', 'openclaw']);
+  const isAgent = (s) => AGENTS.has(s.presetId);
   // Executable a preset launches on a machine (keys of the probe's tools map); '' = plain shell, always present.
   const presetCmd = (m, p) => { const c = p.cmd || {}; return c[m.os] != null ? c[m.os] : m.os === 'mac' ? (c.linux || '') : ''; };
   const toolOf = (m, p) => (p.id === 'gitbash' ? 'gitbash' : String(presetCmd(m, p)).split(/\s+/)[0]);
@@ -363,8 +364,10 @@
     if (m.type === 'wsl') {
       if (presetId === 'claude') return `Claude Code isn't installed in ${m.distro}. In a WSL shell: curl -fsSL https://claude.ai/install.sh | bash`;
       if (presetId === 'antigravity') return `Antigravity isn't installed in ${m.distro}. In a WSL shell: curl -fsSL https://antigravity.google/cli/install.sh | bash`;
+      if (presetId === 'openclaw') return `OpenClaw isn't installed in ${m.distro}. In a WSL shell: curl -fsSL https://openclaw.ai/install.sh | bash (it walks you through setup)`;
     }
     if (presetId === 'claude') return IS_WIN ? 'Claude Code isn\'t installed here. In PowerShell: irm https://claude.ai/install.ps1 | iex' : 'Claude Code isn\'t installed here. In a terminal: curl -fsSL https://claude.ai/install.sh | bash';
+    if (presetId === 'openclaw') return IS_WIN ? 'OpenClaw isn\'t installed here. In PowerShell: iwr -useb https://openclaw.ai/install.ps1 | iex (it walks you through setup)' : 'OpenClaw isn\'t installed here. In a terminal: curl -fsSL https://openclaw.ai/install.sh | bash (it walks you through setup)';
     if (presetId === 'antigravity') return IS_WIN ? 'Antigravity CLI (agy) isn\'t installed here. In PowerShell: irm https://antigravity.google/cli/install.ps1 | iex' : 'Antigravity CLI (agy) isn\'t installed here. In a terminal: curl -fsSL https://antigravity.google/cli/install.sh | bash';
     return `${p.name} isn't available on ${m.name}.`;
   }
@@ -1016,7 +1019,7 @@
     const unconfigured = S.cfg.machines.find((m) => m.type === 'ssh' && !m.host);
     $('#welcome').innerHTML = `
       <h1>One terminal. Every agent.</h1>
-      <div class="lead">Claude, Antigravity and shells on every machine on your LAN, side by side.</div>
+      <div class="lead">Claude, Antigravity, OpenClaw and shells on every machine on your LAN, side by side.</div>
       <div class="cards">${cards.join('')}</div>
       ${unconfigured ? `<div class="setup">${I.server}<span><b>${esc(unconfigured.name)}</b> needs an address before it can be used.</span><span class="spacer"></span><button class="btn sm" data-act="settings">Set it up</button></div>` : ''}
       <div class="keys">
@@ -1105,7 +1108,7 @@
       if (st.status === 'online') items.push({ label: 'Disconnect', run: () => { S.manualDisconnect[m.id] = true; api.disconnect(m.id); } });
       else items.push({ label: 'Connect', run: () => connectMachine(m.id) });
       items.push({ label: 'Set up SSH key…', icon: I.key, run: () => setupKey(m.id) });
-      items.push({ label: 'Install tools (tmux, Claude, Antigravity)…', icon: I.box, run: () => bootstrap(m.id) });
+      items.push({ label: 'Install tools (tmux, Claude, Antigravity, OpenClaw)…', icon: I.box, run: () => bootstrap(m.id) });
       items.push({ label: 'Enable Claude alerts', icon: I.bell, run: () => enableAlerts(m.id) });
       items.push({ label: 'Join Tailscale (sudo tailscale up --ssh)…', icon: I.plug, run: () => launch(m.id, 'shell', { raw: true, cmd: 'sudo tailscale up --ssh && tailscale status | head -5', name: `Tailscale → ${m.name}` }) });
       items.push({ label: 'Share over Tailscale…', icon: I.send, run: openShare });
@@ -1372,7 +1375,7 @@
     for (const m of S.cfg.machines.filter((x) => x.type === 'ssh')) {
       cmd(`Connect ${m.name}`, () => connectMachine(m.id), '', I.plug);
       cmd(`Set up SSH key for ${m.name}`, () => setupKey(m.id), '', I.key);
-      cmd(`Install tools on ${m.name} (tmux, Claude, Antigravity)`, () => bootstrap(m.id), '', I.box);
+      cmd(`Install tools on ${m.name} (tmux, Claude, Antigravity, OpenClaw)`, () => bootstrap(m.id), '', I.box);
       cmd(`Enable Claude alerts on ${m.name}`, () => enableAlerts(m.id), '', I.bell);
     }
     cmd('Reload window', () => api.reload(), 'Ctrl+Shift+R', I.refresh);
@@ -1438,7 +1441,7 @@
     if (!keepMode) S.palMode = null;
     $('#palette').hidden = false;
     const input = $('#palette-input');
-    input.placeholder = S.palMode ? S.palMode.placeholder : 'Switch session, launch Claude / Antigravity / Shell on any machine…';
+    input.placeholder = S.palMode ? S.palMode.placeholder : 'Switch session, launch Claude / Antigravity / OpenClaw / Shell on any machine…';
     input.value = prefix;
     palSel = 0;
     renderPalette();
@@ -1548,7 +1551,7 @@
       ${ssh ? `<div class="m-form-actions">
         <button class="btn sm" data-sact="test">${I.plug} Test connection</button>
         <button class="btn sm" data-sact="key">${I.key} Set up SSH key</button>
-        <button class="btn sm" data-sact="bootstrap">${I.box} Install tmux / Claude / Antigravity</button>
+        <button class="btn sm" data-sact="bootstrap">${I.box} Install tmux / Claude / Antigravity / OpenClaw</button>
         <button class="btn sm" data-sact="alerts">${I.bell} Enable Claude alerts</button>
       </div><div class="probe-out"></div>` : ''}
     </div>`;

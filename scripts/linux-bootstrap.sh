@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Nexus remote bootstrap: installs tmux, Claude Code and the Antigravity CLI (agy) on this Linux machine.
+# Nexus remote bootstrap: installs tmux, Claude Code, the Antigravity CLI (agy) and OpenClaw on this Linux machine.
 # Safe to run repeatedly - anything already installed is skipped.
 set -u
 
@@ -57,9 +57,23 @@ else
   have agy && ok "agy installed" || warn "Antigravity install did not finish - see output above"
 fi
 
+step "OpenClaw"
+if have openclaw; then
+  ok "openclaw $(openclaw --version 2>/dev/null | head -n1)"
+else
+  # The installer brings its own Node.js if needed, then starts the onboarding wizard (model sign-in, gateway).
+  curl -fsSL https://openclaw.ai/install.sh | bash
+  export PATH="$HOME/.local/bin:$PATH"
+  hash -r
+  have openclaw && ok "openclaw installed" || warn "OpenClaw install did not finish - see output above"
+fi
+if have openclaw && ! openclaw gateway status >/dev/null 2>&1; then
+  warn "OpenClaw is not set up yet. Run once: openclaw onboard --install-daemon"
+fi
+
 step "Summary"
-for t in tmux claude agy; do
+for t in tmux claude agy openclaw; do
   if have "$t"; then ok "$t"; else warn "$t not found"; fi
 done
-printf '\n\033[1mNext:\033[0m launch Claude and Antigravity from Nexus. Each asks you to sign in the first time.\n'
+printf '\n\033[1mNext:\033[0m launch Claude, Antigravity and OpenClaw from Nexus. Each asks you to sign in the first time.\n'
 printf 'Close this tab with Ctrl+Shift+W, then click refresh on the machine card.\n\n'

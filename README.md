@@ -1,6 +1,6 @@
 # Nexus
 
-One terminal for Claude Code, the Antigravity CLI (`agy`) and shells: on your own computer (Windows, macOS, Linux,
+One terminal for Claude Code, the Antigravity CLI (`agy`), OpenClaw and shells: on your own computer (Windows, macOS, Linux,
 or a WSL distro) and on your Linux machines (e.g. DGX Sparks) over SSH or Tailscale, with team chat so several people
 can share the machines without stepping on each other.
 
@@ -24,7 +24,7 @@ npm start                                # Windows also: Start-Nexus.cmd
 ### Per-OS behaviour
 
 - **Windows:** local sessions run in PowerShell (pwsh if installed) or Git Bash. **Each WSL distro gets its own machine card**
-  (e.g. "WSL · Ubuntu") with Claude / Antigravity / Shell running *inside* the distro; dropped files and pasted
+  (e.g. "WSL · Ubuntu") with Claude / Antigravity / OpenClaw / Shell running *inside* the distro; dropped files and pasted
   screenshots arrive as `/mnt/c/...` paths.
 - **macOS:** local sessions use your login shell (zsh). Shortcuts use **⌘** (⌘⇧P palette, ⌘1…9, ⌘C / ⌘V); **Ctrl+C**
   always reaches the terminal. Nexus loads your login shell's PATH, so tools from Homebrew or `~/.local/bin` are found
@@ -35,9 +35,10 @@ npm start                                # Windows also: Start-Nexus.cmd
 
 1. **Settings** (Ctrl+,): enter the machine's IP/hostname and user, then Save. Blank fields fall back to `~/.ssh/config`, like `ssh` does.
 2. **Set up SSH key**: opens a tab that creates `~/.ssh/id_ed25519` (if missing) and installs it on the machine. You type the Linux password once.
-3. **Install tmux / Claude / Antigravity**: runs `scripts/linux-bootstrap.sh` on the machine (may ask for your sudo password).
+3. **Install tmux / Claude / Antigravity / OpenClaw**: runs `scripts/linux-bootstrap.sh` on the machine (may ask for your sudo password).
+   OpenClaw's installer starts its setup wizard; if you skip it, run `openclaw onboard --install-daemon` once before using OpenClaw.
 4. **Enable Claude alerts** (machine ⋯ menu): adds Claude Code hooks that ring Nexus when Claude finishes or needs input.
-5. Launch Claude and Antigravity from the sidebar. Each asks you to sign in the first time.
+5. Launch Claude, Antigravity and OpenClaw (`openclaw tui`) from the sidebar. Each asks you to sign in the first time.
 
 The machine needs `sshd` running (`sudo apt install openssh-server`).
 
@@ -129,7 +130,7 @@ Right-click any terminal → **Send selection to …** to pipe output from one a
 
 ## Adding presets
 
-Edit `presets` in the config file, e.g. a project-specific command (`icon` picks a logo: claude, antigravity, git, terminal, powershell):
+Edit `presets` in the config file, e.g. a project-specific command (`icon` picks a logo: claude, antigravity, openclaw, git, terminal, powershell):
 
 ```json
 { "id": "claude-proj", "name": "Claude · api", "color": "#E08A62", "icon": "claude", "cmd": { "linux": "cd ~/code/api && claude" } }
@@ -149,6 +150,7 @@ CI runs the tests on Windows, macOS and Linux on every push. To publish a releas
 Logos in `assets/icons/`, found via [dashboardicons.com](https://dashboardicons.com):
 
 - Claude, Antigravity, Git, Windows, Linux (Tux), NVIDIA: [selfh.st/icons](https://selfh.st/icons/), [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
+- OpenClaw: from [openclaw/openclaw](https://github.com/openclaw/openclaw), [MIT](https://opensource.org/license/mit)
 - PowerShell, Terminal: [homarr-labs/dashboard-icons](https://github.com/homarr-labs/dashboard-icons), [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0)
 
 All product names and logos are trademarks of their respective owners.
