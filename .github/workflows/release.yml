@@ -1,28 +1,59 @@
 name: Release
 
-# Push a tag like v1.3.0 (matching package.json "version") to build installers for Windows, macOS and Linux.
+# Push a tag like v1.3.0 (matching package.json "version"), or push a "version" bump in package.json to main, to build
+# installers for Windows, macOS and Linux. (A version bump on main releases v<version> unless that tag or release
+# already exists; the tag is created when the release is published.)
 # They are uploaded to a draft release, scanned (VirusTotal + Microsoft Defender block; ClamAV is reported), and the
 # release is published only if the blocking scans are clean.
 # Installed copies of Nexus then pick it up automatically.
 on:
   push:
     tags: ['v*']
+    branches: [main]
+    paths: [package.json, .github/workflows/release.yml]
 
 permissions:
   contents: write
 
 jobs:
+  # Which release this run is for, and whether to make one at all (a package.json change that isn't a new version
+  # doesn't release).
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      go: ${{ steps.v.outputs.go }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: v
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"; echo "go=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          tag="v$(node -p 'require("./package.json").version')"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null || gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "$tag already exists: nothing to release"; echo "go=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Releasing $tag from $GITHUB_SHA"; echo "go=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   # Create the (draft) release once, before any build uploads to it; parallel uploaders would otherwise each create one.
   create:
+    needs: version
+    if: needs.version.outputs.go == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Create draft release
         run: |
-          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --title "${GITHUB_REF_NAME#v}" \
-            --notes "Nexus ${GITHUB_REF_NAME#v}. Windows: Nexus-Setup-*.exe · macOS: *-mac-arm64.dmg (Apple Silicon) or *-mac-x64.dmg (Intel) · Linux: .deb (x86_64 / arm64)."
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" --title "${TAG#v}" \
+            --notes "Nexus ${TAG#v}. Windows: Nexus-Setup-*.exe · macOS: *-mac-arm64.dmg (Apple Silicon) or *-mac-x64.dmg (Intel) · Linux: .deb (x86_64 / arm64)."
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.version.outputs.tag }}
 
   build:
     needs: create
@@ -54,8 +85,8 @@ jobs:
 
   # VirusTotal + Microsoft Defender gate (blocking) and ClamAV (reported), then publish: see verify-and-publish.yml.
   verify:
-    needs: build
+    needs: [version, build]
     uses: ./.github/workflows/verify-and-publish.yml
     with:
-      tag: ${{ github.ref_name }}
+      tag: ${{ needs.version.outputs.tag }}
     secrets: inherit
