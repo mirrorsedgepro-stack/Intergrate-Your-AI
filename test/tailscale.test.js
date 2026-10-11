@@ -53,6 +53,16 @@ test('invite codes round-trip and reject junk', () => {
   assert.deepStrictEqual(decodeInvite(evil).machines.map((m) => m.host), ['ok.ts.net']);
 });
 
+test('invite codes: found inside a pasted message, even line-wrapped; damaged ones get a clear error', () => {
+  const code = encodeInvite({ tailnet: 'x.ts.net', machines: [{ name: 'Spark 1', host: 'spark1.tail1.ts.net', user: 'jcee' }] });
+  const wrapped = code.slice(0, 30) + '\r\n   ' + code.slice(30);
+  const message = `3. In Nexus click Share, paste this invite code:\n   ${wrapped}\n\nYou'll log in as Spark 1: jcee.`;
+  assert.strictEqual(decodeInvite(message).machines[0].host, 'spark1.tail1.ts.net');
+  assert.throws(() => decodeInvite('nexus-invite:garbage'), /incomplete or damaged/);
+  assert.throws(() => decodeInvite(code.slice(0, 40)), /incomplete or damaged/);
+  assert.throws(() => decodeInvite(encodeInvite({ machines: [] })), /no machines/);
+});
+
 test('isTailnetAddress', () => {
   assert.ok(isTailnetAddress('100.101.2.3'));
   assert.ok(isTailnetAddress('spark1.tail1234.ts.net'));

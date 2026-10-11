@@ -1781,7 +1781,7 @@
     }
 
     body.innerHTML = `
-      <div class="sh-head"><p class="dim">Invite people to your tailnet so they can use Claude and Antigravity on the Sparks from anywhere. They can reach the Sparks over SSH and nothing else.</p><button class="btn sm ghost" data-sh="refresh">${I.refresh} Refresh</button></div>
+      <div class="sh-head"><p class="dim">Invite people to your tailnet so they can use Claude, Antigravity and OpenClaw on the Sparks from anywhere. They can reach the Sparks over SSH and nothing else.</p><button class="btn sm ghost" data-sh="refresh">${I.refresh} Refresh</button></div>
       ${SH.error ? `<div class="m-error">${esc(SH.error)}</div>` : ''}
       ${step(1, 'This PC on Tailscale', pc, pcDone ? 'done' : '')}
       ${step(2, 'Sparks on your tailnet', `<div class="sh-rows">${rows}</div><p class="dim small">"Join Tailscale" opens a terminal on that Spark running <span class="mono">sudo tailscale up --ssh</span>: type the sudo password, then open the login link it prints.</p>`, sparksDone ? 'done' : '')}
