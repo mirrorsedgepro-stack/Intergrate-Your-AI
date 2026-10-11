@@ -36,7 +36,7 @@
   "author": "mirrorsedgepro-stack",
   "repository": {
     "type": "git",
-    "url": "https://github.com/mirrorsedgepro-stack/AI-Orchestrator.git"
+    "url": "https://github.com/mirrorsedgepro-stack/Intergrate-Your-AI.git"
   },
   "build": {
     "appId": "com.nexus.terminal",
@@ -80,7 +80,7 @@
       {
         "provider": "github",
         "owner": "mirrorsedgepro-stack",
-        "repo": "AI-Orchestrator",
+        "repo": "Intergrate-Your-AI",
         "releaseType": "draft"
       }
     ],
@@ -123,5 +123,5 @@
       ]
     }
   },
-  "homepage": "https://github.com/mirrorsedgepro-stack/AI-Orchestrator"
+  "homepage": "https://github.com/mirrorsedgepro-stack/Intergrate-Your-AI"
 }

@@ -6,7 +6,7 @@ can share the machines without stepping on each other.
 
 ## Install
 
-Download from [Releases](https://github.com/mirrorsedgepro-stack/AI-Orchestrator/releases):
+Download from [Releases](https://github.com/mirrorsedgepro-stack/Intergrate-Your-AI/releases):
 
 | OS | File | Notes |
 |---|---|---|
