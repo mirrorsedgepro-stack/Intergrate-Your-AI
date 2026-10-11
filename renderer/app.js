@@ -1149,7 +1149,8 @@
 
   // ---------------------------------------------------------------- copy / paste / keys
   function copySelection(s) {
-    const text = s.term.getSelection();
+    // "Select all" includes the empty rows below the prompt: drop trailing blank lines and line-end padding.
+    const text = s.term.getSelection().replace(/[ \t]+$/gm, '').replace(/\n+$/, '');
     if (!text) return false;
     api.writeClipboard(text);
     s.term.clearSelection();

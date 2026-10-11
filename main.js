@@ -206,8 +206,17 @@ ipcMain.handle('app:open-config', () => shell.openPath(config.file()));
 ipcMain.handle('app:info', () => ({ version: app.getVersion(), packaged: app.isPackaged }));
 ipcMain.on('app:devtools', () => win && win.webContents.toggleDevTools());
 ipcMain.on('app:reload', () => win && win.webContents.reloadIgnoringCache());
+// Electron 44's clipboard is asynchronous (W3C-style read()/readText()/writeText()); readImage() is gone.
 ipcMain.handle('clipboard:read', () => clipboard.readText());
-ipcMain.on('clipboard:write', (_e, text) => clipboard.writeText(String(text)));
+ipcMain.on('clipboard:write', (_e, text) => { Promise.resolve(clipboard.writeText(String(text))).catch(() => {}); });
+// The first image on the clipboard (a Win+Shift+S / PrtScn screenshot, a copied image) as { data, ext }, or null.
+async function clipboardImage() {
+  for (const item of await clipboard.read()) {
+    const type = item.types.find((t) => t === 'image/png') || item.types.find((t) => /^image\/(jpeg|gif|webp|bmp)$/.test(t));
+    if (type) return { data: Buffer.from(await (await item.getType(type)).arrayBuffer()), ext: type === 'image/jpeg' ? 'jpg' : type.slice(6) };
+  }
+  return null;
+}
 ipcMain.on('app:notify', (_e, { title, body, sessionId }) => {
   if (!Notification.isSupported()) return;
   const n = new Notification({ title, body, icon: ICON });
@@ -479,10 +488,10 @@ ipcMain.handle('session:cwd', async (_e, id) => {
 ipcMain.handle('session:paste-image', safe(async (_e, id) => {
   const s = sessions.get(id);
   if (!s) throw new Error('Session is not running');
-  const img = clipboard.readImage();
-  if (img.isEmpty()) return { path: null };
-  const png = img.toPNG();
-  const name = `paste-${new Date().toISOString().replace(/[:.]/g, '-')}.png`;
+  const img = await clipboardImage();
+  if (!img || !img.data.length) return { path: null };
+  const png = img.data;
+  const name = `paste-${new Date().toISOString().replace(/[:.]/g, '-')}.${img.ext}`;
   const type = machineCfg(s.machineId).type;
   if (type === 'local' || type === 'wsl') {
     const dir = path.join(app.getPath('temp'), 'nexus-paste');
@@ -498,15 +507,18 @@ ipcMain.handle('session:paste-image', safe(async (_e, id) => {
 ipcMain.handle('session:upload-files', safe(async (_e, id, files) => {
   const s = sessions.get(id);
   if (!s) throw new Error('Session is not running');
-  const out = [];
+  const type = machineCfg(s.machineId).type;
+  // Check every file before uploading any, so a folder in the drop doesn't leave half the files uploaded.
   for (const f of files) {
     const st = fs.statSync(f);
     if (st.isDirectory()) throw new Error(`${path.basename(f)} is a folder; drop files instead`);
-    const type = machineCfg(s.machineId).type;
-    if (type === 'local') { out.push(f); continue; }
-    if (type === 'wsl') { out.push(platform.toWslPath(f)); continue; } // WSL sees Windows drives under /mnt
-    if (st.size > 512 * 1024 * 1024) throw new Error(`${path.basename(f)} is larger than 512 MB`);
-    out.push(await getMachine(s.machineId).uploadToInbox(path.basename(f), { localPath: f }));
+    if (type === 'ssh' && st.size > 512 * 1024 * 1024) throw new Error(`${path.basename(f)} is larger than 512 MB`);
+  }
+  const out = [];
+  for (const f of files) {
+    if (type === 'local') out.push(f);
+    else if (type === 'wsl') out.push(platform.toWslPath(f)); // WSL sees Windows drives under /mnt
+    else out.push(await getMachine(s.machineId).uploadToInbox(path.basename(f), { localPath: f }));
   }
   return { paths: out };
 }));

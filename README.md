@@ -139,7 +139,7 @@ Edit `presets` in the config file, e.g. a project-specific command (`icon` picks
 ## Development
 
 ```
-npm test        # unit tests (ssh_config, known_hosts, remote commands, alert hooks, config migration)
+npm test        # unit tests (ssh_config, known_hosts, remote commands, alert hooks, config migration, team chat, invites, palette)
 npm run dist    # build dist/Nexus-Setup-<version>.exe
 ```
 
