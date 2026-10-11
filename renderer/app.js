@@ -1,6 +1,7 @@
 'use strict';
 (() => {
   const api = window.nexus;
+  const { fuzzy, mentions, isExeTitle } = window.NexusUtil;
   const IS_MAC = api.platform === 'darwin';
   const IS_WIN = api.platform === 'win32';
   document.body.classList.add(`platform-${api.platform}`);
@@ -199,7 +200,7 @@
     term.onTitleChange((t) => {
       const title = t.replace(/^[\s✳⠂⠐⠈⠁⠄⠠⡀⢀·*]+/, '').trim();
       // PowerShell / cmd under ConPTY title themselves with their executable's path; that's noise next to the name.
-      s.title = /^(administrator:\s*)?([a-z]:\\|\\\\).*\.exe$/i.test(title) || /^[\w.-]+\.exe$/i.test(title) ? '' : title;
+      s.title = isExeTitle(title) ? '' : title;
       renderChrome();
     });
     // Bells (and OSC 9 / 777 notifications) are exact "agent is waiting" signals: Claude's Stop/Notification
@@ -696,7 +697,7 @@
         : s.status === 'starting' ? '<span class="chip ghost">starting…</span>' : '';
       head.innerHTML = `${glyph(s.presetId, 'sm', s.machineId)}<span class="p-title">${esc(s.name)}</span>`
         + `<span class="chip" style="--mc:${m.color}">${esc(m.name)}</span>`
-        + (s.cwd ? `<span class="chip ghost" title="${esc(s.cwd)}">${I.folder}${esc(shortPath(s.cwd))}</span>` : '')
+        + (s.cwd && s.cwd !== '~' ? `<span class="chip ghost" title="${esc(s.cwd)}">${I.folder}${esc(shortPath(s.cwd))}</span>` : '')
         + (s.readOnly ? '<span class="chip" style="--mc:#bb9af7">read-only</span>' : '')
         + stateChip
         + `<span class="p-sub" title="${esc(s.tmuxName ? `tmux session ${s.tmuxName}` : '')}">${esc(s.title)}</span>`
@@ -1400,22 +1401,6 @@
     return items;
   }
 
-  function fuzzy(q, text) {
-    const t = text.toLowerCase();
-    let ti = 0, score = 0, last = -2;
-    const hits = [];
-    for (const ch of q.toLowerCase()) {
-      if (ch === ' ') continue;
-      const j = t.indexOf(ch, ti);
-      if (j < 0) return null;
-      score += j === last + 1 ? 6 : 1;
-      if (j === 0 || ' -·@('.includes(t[j - 1])) score += 4;
-      hits.push(j);
-      last = j;
-      ti = j + 1;
-    }
-    return { score: score - t.length * 0.02, hits: new Set(hits) };
-  }
   function highlight(str, offset, hits) {
     let out = '';
     for (let i = 0; i < str.length; i++) out += hits.has(i + offset) ? `<mark>${esc(str[i])}</mark>` : esc(str[i]);
@@ -1524,7 +1509,7 @@
       s.lastInput = now();
       if (submit) setTimeout(() => api.write(s.pid, '\r'), 150);
     }
-    toast(`Sent to ${targets.map((s) => s.name).join(', ')}`, 'ok');
+    toast(`Sent to ${targets.map((s) => `${s.name} on ${machineById(s.machineId).name}`).join(', ')}`, 'ok');
     $('#composer-text').value = '';
     closeComposer();
   }
@@ -1978,8 +1963,7 @@
     const fresh = Date.now() - m.ts < 60000;
     if (!mine && fresh && m.kind !== 'activity') {
       if (!TM.open) TM.unread++;
-      const first = myName().split(/\s+/)[0].toLowerCase();
-      if (first && new RegExp(`@${first.replace(/[.*+?^${}()|[\]\\]/g, '\\  // ---------------------------------------------------------------- toasts')}\\b`, 'i').test(m.text)) {
+      if (mentions(m.text, myName())) {
         api.notify({ title: `${m.from.name} mentioned you`, body: m.text.slice(0, 200) });
         api.flash();
       }
