@@ -118,7 +118,7 @@ function createWindow() {
 // ---- auto-update (installed builds only; releases on GitHub) ----
 async function checkReleaseNotice() {
   try {
-    const r = await fetch('https://api.github.com/repos/mirrorsedgepro-stack/Spark-Orchestrator/releases/latest', { headers: { Accept: 'application/vnd.github+json' } });
+    const r = await fetch('https://api.github.com/repos/mirrorsedgepro-stack/AI-Orchestrator/releases/latest', { headers: { Accept: 'application/vnd.github+json' } });
     if (!r.ok) return;
     const rel = await r.json();
     const v = String(rel.tag_name || '').replace(/^v/, '');

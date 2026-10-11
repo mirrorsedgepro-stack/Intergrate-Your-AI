@@ -1869,7 +1869,7 @@
         email, code,
         message: `You're invited to use my machines through Nexus.\n\n`
           + `1. Install Tailscale (https://tailscale.com/download) and join my tailnet with this link, signing in as ${email}:\n   ${inv.inviteUrl}\n\n`
-          + `2. Install Nexus: https://github.com/mirrorsedgepro-stack/Spark-Orchestrator/releases\n\n`
+          + `2. Install Nexus: https://github.com/mirrorsedgepro-stack/AI-Orchestrator/releases\n\n`
           + `3. In Nexus click the Share (people) icon, paste this invite code under "Got an invite code?", and click Add machines:\n   ${code}\n\n`
           + `You'll log in as ${users}. Please don't change other people's sessions or settings.`,
       };

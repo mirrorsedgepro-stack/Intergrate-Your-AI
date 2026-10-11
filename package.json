@@ -1,7 +1,7 @@
 {
   "name": "nexus-terminal",
   "productName": "Nexus",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "One terminal to orchestrate Claude, Antigravity, OpenClaw and shells across your machines (Windows, macOS, Linux, WSL)",
   "main": "main.js",
   "private": true,
@@ -36,7 +36,7 @@
   "author": "mirrorsedgepro-stack",
   "repository": {
     "type": "git",
-    "url": "https://github.com/mirrorsedgepro-stack/Spark-Orchestrator.git"
+    "url": "https://github.com/mirrorsedgepro-stack/AI-Orchestrator.git"
   },
   "build": {
     "appId": "com.nexus.terminal",
@@ -80,7 +80,7 @@
       {
         "provider": "github",
         "owner": "mirrorsedgepro-stack",
-        "repo": "Spark-Orchestrator",
+        "repo": "AI-Orchestrator",
         "releaseType": "draft"
       }
     ],
@@ -123,5 +123,5 @@
       ]
     }
   },
-  "homepage": "https://github.com/mirrorsedgepro-stack/Spark-Orchestrator"
+  "homepage": "https://github.com/mirrorsedgepro-stack/AI-Orchestrator"
 }
