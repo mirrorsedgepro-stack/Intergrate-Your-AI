@@ -273,7 +273,7 @@ ipcMain.handle('local:dirs', safe(async () => {
   return { repos: repos.filter((p) => p !== home).map(tilde), dirs: dirs.map(tilde) };
 }));
 
-// ---- IPC: Tailscale (sharing the Sparks with guests) ----
+// ---- IPC: Tailscale (sharing SSH machines with guests) ----
 // The API token is encrypted with the OS (DPAPI via safeStorage) and never leaves the main process.
 function tsToken() {
   const enc = (config.load().tailscale || {}).token;
@@ -319,7 +319,7 @@ ipcMain.handle('ts:clear-token', () => {
   return true;
 });
 
-// Everything the sharing panel shows: Spark devices, guests (policy group), their join state, pending invites.
+// Everything the sharing panel shows: shared devices, guests (policy group), their join state, pending invites.
 ipcMain.handle('ts:overview', safe(async (_e, machines) => {
   const api = tsApi();
   const [devices, users, invites, { policy }] = await Promise.all([api.devices(), api.users(), api.invites(), api.getPolicy()]);
@@ -331,7 +331,7 @@ ipcMain.handle('ts:overview', safe(async (_e, machines) => {
   return { sparks: matchDevices(devices, machines), guests, tag: tailscale.SPARK_TAG };
 }));
 
-// Preview the policy + tag changes needed to share the Sparks (no changes made).
+// Preview the policy + tag changes needed to share the machines (no changes made).
 ipcMain.handle('ts:plan', safe(async (_e, { machines, sshUsers, addGuest, removeGuest }) => {
   const api = tsApi();
   const [{ policy, etag }, devices] = await Promise.all([api.getPolicy(), api.devices()]);
@@ -370,7 +370,7 @@ ipcMain.handle('ts:revoke', safe(async (_e, { userId, inviteId }) => {
 ipcMain.handle('ts:encode-invite', (_e, data) => tailscale.encodeInvite(data));
 ipcMain.handle('ts:decode-invite', safe(async (_e, code) => tailscale.decodeInvite(code)));
 
-// ---- IPC: team chat + presence (stored on the hub Spark, over the existing SSH connection) ----
+// ---- IPC: team chat + presence (stored on the hub machine, over the existing SSH connection) ----
 let hub = null; // { machineId, ch: CollabHub }
 function stopHub() {
   if (hub) { hub.ch.removeAllListeners(); hub.ch.stop(); }

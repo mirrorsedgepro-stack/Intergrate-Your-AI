@@ -1,7 +1,7 @@
 # Nexus
 
 One terminal for Claude Code, the Antigravity CLI (`agy`), OpenClaw and shells: on your own computer (Windows, macOS, Linux,
-or a WSL distro) and on your Linux machines (e.g. DGX Sparks) over SSH or Tailscale, with team chat so several people
+or a WSL distro) and on any Linux machines you can SSH into (a GPU workstation, a home server, a cloud VM, an NVIDIA DGX…), directly or over Tailscale, with team chat so several people
 can share the machines without stepping on each other.
 
 ## Install
@@ -57,43 +57,43 @@ The machine needs `sshd` running (`sudo apt install openssh-server`).
 | **Send last reply** | Ctrl+Shift+S (or the ➤ button on an agent pane) puts the agent's latest answer into the broadcast composer, aimed at your other agents, ready to edit and send. |
 | **Broadcast** | Ctrl+Shift+Enter: write one prompt, send it to several sessions. |
 
-## Sharing the Sparks over Tailscale
+## Sharing your machines over Tailscale
 
 Click the **Share** (people) icon in the title bar. Guests join your tailnet, but an access policy limits them to
-SSH on the two Sparks, through **Tailscale SSH**: no keys to hand out, and removing a guest cuts their access at once.
-They log in as the Sparks' configured users (`jcee` / `jcee-slave`), so they share those accounts with you.
+SSH on your SSH machines, through **Tailscale SSH**: no keys to hand out, and removing a guest cuts their access at once.
+They log in as each machine's configured user (the **User** field in Settings), so they share those accounts with you.
 
 **Owner, once:**
 1. **This PC on Tailscale**: Install Tailscale (opens `winget install Tailscale.Tailscale`), then sign in from the tray icon.
-2. **Sparks on your tailnet**: "Join Tailscale" on each Spark runs `sudo tailscale up --ssh` there; type the sudo password and open the login link it prints. Nexus then records each Spark's tailnet address and falls back to it whenever the LAN address can't be reached (a **TS** badge shows on the card).
+2. **Machines on your tailnet**: "Join Tailscale" on each machine runs `sudo tailscale up --ssh` there; type the sudo password and open the login link it prints. Nexus then records each machine's tailnet address and falls back to it whenever the LAN address can't be reached (a **TS** badge shows on the card).
 3. **API token**: create an API access token at [login.tailscale.com → Settings → Keys](https://login.tailscale.com/admin/settings/keys) and paste it in. It's stored encrypted with your Windows account (DPAPI) and never leaves the Nexus main process. Tokens expire (max 90 days); paste a new one when invites start failing.
 4. **Access rules → Review**: shows exactly what changes in your tailnet policy, then **Apply**. Nexus validates the policy with Tailscale first and only saves it if nobody edited it meanwhile. It:
-   - creates `tag:nexus-spark` and tags the Sparks with it;
+   - creates `tag:nexus-spark` and tags the shared machines with it (the name is kept for existing setups);
    - narrows any "everyone can reach everything" rule to admins (you), so guests can't reach your other devices;
-   - lets `group:nexus-guests` reach the Sparks on TCP 22 only, and adds a Tailscale SSH rule for you and the guests.
+   - lets `group:nexus-guests` reach those machines on TCP 22 only, and adds a Tailscale SSH rule for you and the guests.
 
 **Inviting someone:** enter their email and click **Invite**. Nexus adds them to the guest group, creates a Tailscale invite
 (Tailscale also emails it), and gives you a ready-to-send message containing the invite link and a **Nexus invite code**.
 **Remove** revokes the invite or deletes the user from your tailnet.
 
 **Guest:** install Tailscale and accept the invite (signing in with the invited email), install Nexus, open **Share**, paste
-the invite code under "Got an invite code?" and click **Add Sparks**. The code contains only the Sparks' tailnet names and
+the invite code under "Got an invite code?" and click **Add machines**. The code contains only the machines' tailnet names and
 login users; no keys or tokens.
 
-> Tip: Spark 1 currently has `/etc/ssh/sshd_config.d/99-temp-pw.conf` enabling SSH password logins. Tailscale SSH doesn't
-> need it; consider removing it (`sudo rm /etc/ssh/sshd_config.d/99-temp-pw.conf && sudo systemctl reload ssh`) once your key works.
+> Tip: Tailscale SSH and Nexus's own SSH key setup don't need password logins. If you enabled `PasswordAuthentication`
+> on a machine to get started, consider turning it off again once your key works.
 
 ## Team chat and deconfliction
 
-Open with the chat icon in the title bar (Ctrl+Shift+M / ⌘⇧M). Everyone using the same Sparks lands in the same chat
-automatically: it lives on one Spark (`~/.nexus/collab`, by default the one whose hostname sorts first; override in
+Open with the chat icon in the title bar (Ctrl+Shift+M / ⌘⇧M). Everyone using the same machines lands in the same chat
+automatically: it lives on one of them (`~/.nexus/collab`, by default the one whose hostname sorts first; override in
 Settings) and travels over each person's existing SSH connection, so there's no extra server or port.
 
-- **Who's doing what:** the people list shows everyone online, their status (`/status Training on Spark 2 until 3pm`)
+- **Who's doing what:** the people list shows everyone online, their status (`/status Training on the GPU box until 3pm`)
   and which agent sessions they have open. The sidebar shows avatars on sessions someone else is also in.
 - **Before you collide:** opening a session someone else has open asks first, offering **Watch read-only**
   (`tmux attach -r`). Starting an agent in a folder where someone's agent already runs warns you and offers to
-  message them. Optionally, Nexus posts "started Claude in ~/project on spark1" when you launch an agent.
+  message them. Optionally, Nexus posts "started Claude in ~/project on gpu-box" when you launch an agent.
 - **@mentions** raise a notification. The chat keeps the last ~2000 messages.
 
 ## How it works
