@@ -196,7 +196,12 @@
       if (s.status === 'running') api.resize(s.pid, cols, rows);
       renderStatus();
     });
-    term.onTitleChange((t) => { s.title = t.replace(/^[\s✳⠂⠐⠈⠁⠄⠠⡀⢀·*]+/, '').trim(); renderChrome(); });
+    term.onTitleChange((t) => {
+      const title = t.replace(/^[\s✳⠂⠐⠈⠁⠄⠠⡀⢀·*]+/, '').trim();
+      // PowerShell / cmd under ConPTY title themselves with their executable's path; that's noise next to the name.
+      s.title = /^(administrator:\s*)?([a-z]:\\|\\\\).*\.exe$/i.test(title) || /^[\w.-]+\.exe$/i.test(title) ? '' : title;
+      renderChrome();
+    });
     // Bells (and OSC 9 / 777 notifications) are exact "agent is waiting" signals: Claude's Stop/Notification
     // hooks ring one (see "Enable Claude alerts"), so they override the output-volume heuristic.
     const signal = (body) => {
@@ -954,11 +959,11 @@
       document.body.appendChild(ov);
       const input = ov.querySelector('input');
       const done = (v) => { ov.remove(); resolve(v); focused()?.term.focus(); };
+      ov.close = () => done(null);
       ov.querySelector('[data-ok]').onclick = () => done(input.value.trim() ? input.value : null);
       ov.querySelector('[data-x]').onclick = () => done(null);
       input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') { e.preventDefault(); done(input.value.trim() ? input.value : null); }
-        if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(null); }
       });
       setTimeout(() => input.focus(), 0);
     });
@@ -1000,6 +1005,7 @@
     renderPaneHeads();
     renderStatus();
     if (!$('#composer').hidden) renderTargets();
+    if (!S.order.length) renderWelcome();
   }
   function renderAll() {
     renderPanes();
@@ -1008,19 +1014,22 @@
 
   function renderWelcome() {
     const ms = [...S.cfg.machines].sort((a, b) => (a.type === b.type ? 0 : a.type === 'ssh' ? -1 : 1));
-    const cards = [];
-    for (const m of ms) {
-      for (const p of presetsFor(m).filter((x) => x.id !== 'gitbash')) {
+    const groups = ms.map((m) => {
+      const st = S.mstate[m.id] || {};
+      const status = m.type === 'local' ? 'online' : (st.status || 'offline');
+      const sub = m.type === 'ssh' ? (m.host ? `${m.user ? m.user + '@' : ''}${m.host}` : 'not configured') : m.type === 'wsl' ? `WSL · ${m.distro}` : `this computer · ${OS_LABEL[m.os] || ''}`;
+      const cards = presetsFor(m).map((p) => {
         const missing = isMissing(m, p);
-        cards.push(`<button class="card-launch ${missing ? 'missing' : ''}" style="--c:${p.color}" data-act="launch" data-m="${m.id}" data-p="${p.id}">
-          ${glyph(p.id, 'lg', m.id)}<div><div class="cl-name">${esc(p.name)}</div><div class="cl-sub">on ${esc(m.name)}${missing ? ' · not installed' : ''}</div></div></button>`);
-      }
-    }
+        return `<button class="card-launch ${missing ? 'missing' : ''}" style="--c:${p.color}" data-act="launch" data-m="${m.id}" data-p="${p.id}" title="New ${esc(p.name)} on ${esc(m.name)} · Shift+click to pick a folder">
+          ${glyph(p.id, 'lg', m.id)}<div><div class="cl-name">${esc(p.name)}</div>${missing ? '<div class="cl-sub">not installed</div>' : ''}</div></button>`;
+      }).join('');
+      return `<section class="w-machine" style="--c:${m.color}"><div class="w-head"><span class="m-icon">${mIcon(m)}</span><b>${esc(m.name)}</b><span class="dot ${status}" title="${status}"></span><span class="w-sub">${esc(sub)}</span></div><div class="cards">${cards}</div></section>`;
+    });
     const unconfigured = S.cfg.machines.find((m) => m.type === 'ssh' && !m.host);
     $('#welcome').innerHTML = `
       <h1>One terminal. Every agent.</h1>
       <div class="lead">Claude, Antigravity, OpenClaw and shells on every machine on your LAN, side by side.</div>
-      <div class="cards">${cards.join('')}</div>
+      <div class="w-machines">${groups.join('')}</div>
       ${unconfigured ? `<div class="setup">${I.server}<span><b>${esc(unconfigured.name)}</b> needs an address before it can be used.</span><span class="spacer"></span><button class="btn sm" data-act="settings">Set it up</button></div>` : ''}
       <div class="keys">
         <div><kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>P</kbd></div><div>Command palette: launch or switch anything</div>
@@ -1232,15 +1241,23 @@
     scheduleFit();
   }
 
+  // Open dialogs (palette, settings, share, prompts) own the keyboard: keys never reach the terminal behind them,
+  // even when focus was left in it, and Escape closes the topmost one. Each overlay has a .close() method.
+  const topOverlay = () => [...document.querySelectorAll('.overlay')].filter((o) => !o.hidden).pop() || null;
   window.addEventListener('keydown', (e) => {
-    if (e.target.closest && e.target.closest('.xterm')) return; // terminal handles its own
-    if (e.key === 'Escape') {
-      if (!$('#ctxmenu').hidden) return hideMenu();
-      if (!$('#palette').hidden) return closePalette();
-      if (!$('#settings').hidden) return closeSettings();
-      if ($('#share') && !$('#share').hidden) return closeShare();
-      if (!$('#composer').hidden) return closeComposer();
+    if (e.key === 'Escape' && !$('#ctxmenu').hidden) { e.preventDefault(); e.stopPropagation(); return hideMenu(); }
+    const dlg = topOverlay();
+    if (dlg) {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); dlg.close?.(); return; }
+      if (!dlg.contains(e.target)) {
+        e.preventDefault();
+        e.stopPropagation();
+        (dlg.querySelector('input:not([type=hidden]):not([disabled]), textarea, select, button.primary') || dlg).focus();
+      }
+      return; // no app shortcuts while a dialog is open
     }
+    if (e.target.closest && e.target.closest('.xterm')) return; // terminal handles its own
+    if (e.key === 'Escape' && !$('#composer').hidden) return closeComposer();
     if (e.target.matches?.('input, textarea, select') && !(e.ctrlKey && e.shiftKey)) return;
     if (handleShortcut(e)) e.preventDefault();
   }, true);
@@ -1346,10 +1363,10 @@
     });
     const ms = [...S.cfg.machines].sort((a, b) => (a.type === b.type ? 0 : a.type === 'ssh' ? -1 : 1));
     for (const m of ms) {
-      for (const p of presetsFor(m)) items.push({ group: 'Launch', glyph: p.id, m: m.id, c: p.color, label: `New ${p.name}`, sub: `on ${m.name}`, run: () => launch(m.id, p.id) });
+      for (const p of presetsFor(m)) items.push({ group: 'Launch', glyph: p.id, m: m.id, c: p.color, label: `New ${p.name}`, sub: `on ${m.name}${isMissing(m, p) ? ' · not installed' : ''}`, missing: isMissing(m, p), run: () => launch(m.id, p.id) });
     }
     for (const m of ms) {
-      for (const p of presetsFor(m)) items.push({ group: 'Launch in folder', glyph: p.id, m: m.id, c: p.color, label: `${p.name} in folder…`, sub: `on ${m.name}`, run: () => launchInFolder(m.id, p.id) });
+      for (const p of presetsFor(m)) items.push({ group: 'Launch in folder', glyph: p.id, m: m.id, c: p.color, label: `${p.name} in folder…`, sub: `on ${m.name}${isMissing(m, p) ? ' · not installed' : ''}`, missing: isMissing(m, p), run: () => launchInFolder(m.id, p.id) });
     }
     for (const w of S.cfg.workspaces || []) {
       items.push({ group: 'Workspaces', icon: I.layout, label: `Open workspace ${w.name}`, sub: `${w.sessions.length} sessions`, run: () => openLayout(w) });
@@ -1430,7 +1447,7 @@
       lastGroup = it.group;
       const ic = it.glyph ? glyph(it.glyph, '', it.m) : `<span class="glyph" style="--c:#7aa2f7">${it.icon}</span>`;
       const sub = it.sub ? `<small>${highlight(it.sub, it.label.length + 1, it.hits)}</small>` : '';
-      return `${head}<div class="p-item ${i === palSel ? 'sel' : ''}" data-i="${i}" style="${it.c ? `--c:${it.c}` : ''}">${ic}`
+      return `${head}<div class="p-item ${i === palSel ? 'sel' : ''} ${it.missing ? 'missing' : ''}" data-i="${i}" style="${it.c ? `--c:${it.c}` : ''}">${ic}`
         + `<span class="p-label"><b>${highlight(it.label, 0, it.hits)}</b>${sub}</span>${it.kbd ? `<kbd>${esc(it.kbd)}</kbd>` : ''}</div>`;
     }).join('') : '<div class="p-empty">No matches</div>';
     $('#palette-list .p-item.sel')?.scrollIntoView({ block: 'nearest' });
@@ -1464,8 +1481,8 @@
     if (e.key === 'ArrowDown') { palSel = (palSel + 1) % Math.max(1, palItems.length); renderPalette(); e.preventDefault(); }
     else if (e.key === 'ArrowUp') { palSel = (palSel - 1 + palItems.length) % Math.max(1, palItems.length); renderPalette(); e.preventDefault(); }
     else if (e.key === 'Enter') { runPalette(palSel); e.preventDefault(); }
-    else if (e.key === 'Escape') { closePalette(); e.preventDefault(); }
   });
+  $('#palette').close = closePalette;
   $('#palette-list').addEventListener('click', (e) => { const el = e.target.closest('[data-i]'); if (el) runPalette(Number(el.dataset.i)); });
   $('#palette-list').addEventListener('mousemove', (e) => {
     const el = e.target.closest('[data-i]');
@@ -1583,6 +1600,7 @@
     S.draft = JSON.parse(JSON.stringify(S.cfg));
     renderSettings();
     $('#settings').hidden = false;
+    $('#settings .modal').focus();
   }
   function closeSettings() {
     $('#settings').hidden = true;
@@ -1653,6 +1671,7 @@
   });
   $('#settings-save').addEventListener('click', async () => { await saveSettings(); closeSettings(); toast('Settings saved', 'ok'); });
   $('#settings').addEventListener('click', (e) => { if (e.target.closest('[data-close]') || e.target.id === 'settings') closeSettings(); });
+  $('#settings').close = closeSettings;
   $('#settings-open-file').addEventListener('click', () => api.openConfig());
   $('#btn-settings').addEventListener('click', openSettings);
 
@@ -1694,12 +1713,14 @@
       ov = document.createElement('div');
       ov.id = 'share';
       ov.className = 'overlay';
-      ov.innerHTML = '<div class="modal share"><div class="modal-head"><h2>Share the Sparks</h2><button class="icon-btn" data-sh="close">' + I.x + '</button></div><div class="modal-body" id="share-body"></div></div>';
+      ov.innerHTML = '<div class="modal share" tabindex="-1"><div class="modal-head"><h2>Share the Sparks</h2><button class="icon-btn" data-sh="close">' + I.x + '</button></div><div class="modal-body" id="share-body"></div></div>';
       document.body.appendChild(ov);
+      ov.close = closeShare;
       ov.addEventListener('click', onShareClick);
       ov.addEventListener('mousedown', (e) => { if (e.target === ov) closeShare(); });
     }
     ov.hidden = false;
+    ov.querySelector('.modal').focus();
     SH.open = true;
     SH.result = null;
     SH.plan = null;
@@ -1994,9 +2015,8 @@
       ov.innerHTML = `<div class="modal prompt"><div class="modal-head"><h2>${esc(title)}</h2></div><div class="modal-body"><p class="prompt-desc" style="word-break:normal">${esc(desc)}</p></div>
         <div class="modal-foot"><span class="spacer"></span>${options.map((o, i) => `<button class="btn ${o.primary ? 'primary' : o.ghost ? 'ghost' : ''}" data-i="${i}">${esc(o.label)}</button>`).join('')}</div></div>`;
       document.body.appendChild(ov);
-      const done = (v) => { ov.remove(); document.removeEventListener('keydown', esc_, true); resolve(v); };
-      const esc_ = (e) => { if (e.key === 'Escape') { e.stopPropagation(); e.preventDefault(); done(null); } };
-      document.addEventListener('keydown', esc_, true);
+      const done = (v) => { ov.remove(); resolve(v); focused()?.term.focus(); };
+      ov.close = () => done(null);
       ov.addEventListener('click', (e) => { const b = e.target.closest('[data-i]'); if (b) done(options[Number(b.dataset.i)].value); else if (e.target === ov) done(null); });
       ov.querySelector('.btn.primary')?.focus();
     });

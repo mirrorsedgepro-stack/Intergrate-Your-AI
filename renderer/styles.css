@@ -122,11 +122,12 @@ kbd { font: 500 10.5px var(--mono); padding: 1px 5px; border-radius: 5px; backgr
 .m-error { margin-top: 8px; font-size: 11.5px; color: #f3a6b4; background: rgba(247,118,142,.08); border-radius: 8px; padding: 6px 8px; line-height: 1.35; }
 .m-error button { color: var(--brand-1); text-decoration: underline; padding: 0; }
 
-.launchers { display: flex; gap: 6px; margin-top: 10px; }
-.launch span:last-child { white-space: nowrap; font-size: 11px; }
+/* Two columns of compact launchers: balanced for any count (4 on Linux, 5 on Windows with Git Bash). */
+.launchers { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; margin-top: 10px; }
+.launch span:last-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; font-size: 11.5px; }
 .launch {
-  display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 8px 5px 7px;
-  flex: 1 1 auto; border-radius: 9px; background: var(--bg-2); box-shadow: inset 0 0 0 1px var(--line);
+  display: flex; align-items: center; gap: 7px; padding: 5px 8px 5px 5px; min-width: 0;
+  border-radius: 9px; background: var(--bg-2); box-shadow: inset 0 0 0 1px var(--line);
   color: var(--text-2); font-size: 11.5px; font-weight: 500; transition: all .15s; position: relative;
 }
 .launch:hover { color: var(--text); background: color-mix(in srgb, var(--c) 9%, var(--bg-2)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--c) 40%, transparent), 0 6px 18px -8px var(--c); transform: translateY(-1px); }
@@ -201,11 +202,18 @@ kbd { font: 500 10.5px var(--mono); padding: 1px 5px; border-radius: 5px; backgr
 .welcome { position: absolute; inset: 0; overflow-y: auto; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px 30px; }
 .welcome h1 { margin: 0; font-size: 34px; font-weight: 600; letter-spacing: -.02em; background: linear-gradient(100deg, #e08a62 0%, #bb9af7 40%, #7aa2f7 70%, #73daca 100%); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .welcome .lead { color: var(--text-2); margin: 8px 0 30px; font-size: 14px; }
-.cards { display: grid; grid-template-columns: repeat(3, minmax(170px, 210px)); gap: 12px; }
+/* One row of launch cards per machine. */
+.w-machines { display: flex; flex-direction: column; gap: 18px; width: min(820px, 100%); }
+.w-head { display: flex; align-items: center; gap: 9px; margin-bottom: 8px; color: var(--text-2); font-size: 12.5px; }
+.w-head .m-icon { width: 24px; height: 24px; }
+.w-head b { color: var(--text); font-weight: 600; }
+.w-head .w-sub { color: var(--text-3); font-family: var(--mono, monospace); font-size: 11.5px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
 .card-launch {
-  text-align: left; padding: 16px; border-radius: 14px; background: var(--panel); box-shadow: inset 0 0 0 1px var(--line);
-  display: flex; flex-direction: column; gap: 12px; transition: all .18s;
+  text-align: left; padding: 12px 14px; border-radius: 12px; background: var(--panel); box-shadow: inset 0 0 0 1px var(--line);
+  display: flex; align-items: center; gap: 12px; transition: all .18s; min-width: 0;
 }
+.card-launch > div { min-width: 0; }
 .card-launch:hover { transform: translateY(-2px); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--c) 45%, transparent), 0 18px 40px -22px var(--c); background: color-mix(in srgb, var(--c) 5%, var(--panel)); }
 .card-launch .cl-name { font-weight: 600; font-size: 14px; }
 .card-launch .cl-sub { color: var(--text-3); font-size: 12px; margin-top: 2px; }
@@ -266,6 +274,9 @@ kbd { font: 500 10.5px var(--mono); padding: 1px 5px; border-radius: 5px; backgr
 .p-item.sel { background: color-mix(in srgb, var(--c, #7aa2f7) 13%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--c, #7aa2f7) 30%, transparent); }
 .p-item .p-label { flex: 1; min-width: 0; }
 .p-item .p-label b { font-weight: 500; }
+.p-item.missing { opacity: .55; }
+.p-item.missing .glyph .logo { filter: grayscale(1); }
+.modal:focus { outline: none; }
 .p-item .p-label small { color: var(--text-3); margin-left: 8px; font-size: 11.5px; }
 .p-item .p-label mark { background: none; color: var(--c, var(--brand-1)); font-weight: 600; }
 .p-empty { padding: 26px; text-align: center; color: var(--text-3); }
