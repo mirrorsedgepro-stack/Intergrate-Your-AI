@@ -44,7 +44,7 @@ jobs:
       - name: Scan Virus
         id: scan
         continue-on-error: true
-        uses: hugoalh/scan-virus-ghaction@v0.20.1
+        uses: hugoalh/scan-virus-ghaction@99c81e8991ad1074a14e5f22a21bce9be035e14e # v0.20.1
         with:
           clamav_enable: 'True'
           clamav_update: 'True'
@@ -74,7 +74,7 @@ jobs:
           }
           "- Microsoft Defender (signatures $sig): " + ($(if ($bad) { 'THREATS FOUND' } else { 'no threats' })) | Out-File defender.md -Encoding utf8
           if ($bad) { Write-Error "Defender found threats"; exit 1 }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: defender
           path: defender.md
@@ -124,7 +124,7 @@ jobs:
           done
           cat vt.md
           [ "$bad" = "0" ] || { echo "::error::VirusTotal flagged a file (or a check failed); not publishing"; exit 1; }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: virustotal
@@ -136,7 +136,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           merge-multiple: true
           path: results

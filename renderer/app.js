@@ -995,6 +995,18 @@
     api.answerPassphrase(id, v);
   });
 
+  api.onHostAsk(async (id, info) => {
+    const target = info.port && Number(info.port) !== 22 ? `${info.host}:${info.port}` : info.host;
+    const ok = await choose({
+      title: `Trust ${info.machine}?`,
+      desc: `This is the first connection to ${target} and its host key isn't in your known_hosts. Its fingerprint is ${info.fingerprint}. `
+        + `To check it, run on that machine: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub (or compare with what plain ssh showed you). `
+        + 'If it matches, trust it; Nexus remembers it and warns you if it ever changes.',
+      options: [{ label: 'Cancel', value: false, ghost: true }, { label: 'Trust and connect', value: true, primary: true }],
+    });
+    api.answerHost(id, ok === true);
+  });
+
   api.onUpdateAvailable(({ version, url }) => {
     toast(`Nexus ${version} is available.`, 'ok', 60000, { label: 'Download', run: () => window.open(url) });
   });
@@ -2103,14 +2115,27 @@
         </div></div>`).join('') : '<div class="dim small">Nobody else online.</div>';
     const list = $('#team-msgs');
     const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 40;
+    // Names in chat are self-declared and anyone who can write to the hub can post: show who a name belongs to (client
+    // id, Tailscale login) on hover, and flag a name used from more than one Nexus.
+    const clientsByName = new Map();
+    for (const x of [...TM.messages.map((m) => m.from), ...TM.presence]) {
+      const n = String(x.name || '').trim().toLowerCase();
+      if (!clientsByName.has(n)) clientsByName.set(n, new Set());
+      if (x.client) clientsByName.get(n).add(x.client);
+    }
+    const who = (f) => {
+      const shared = (clientsByName.get(String(f.name || '').trim().toLowerCase()) || new Set()).size > 1;
+      const tip = `Self-declared name${f.login ? ` · Tailscale login ${f.login}` : ''} · device ${String(f.client || '?').slice(0, 6)}${f.client === myClient() ? ' (you)' : ''}`;
+      return `<b title="${esc(tip)}">${esc(f.name)}</b>${shared ? ' <span class="chip" style="--mc:#e0af68" title="More than one Nexus uses this name: check the device id on hover">same name, other device</span>' : ''}`;
+    };
     let prev = null;
     list.innerHTML = TM.messages.map((m) => {
-      if (m.kind === 'activity') { prev = null; return `<div class="tm-act">${avatar(m.from.name, 'xs')}<b>${esc(m.from.name)}</b> ${esc(m.text)} <span class="dim">${fmtTime(m.ts)}</span></div>`; }
-      if (m.kind === 'status') { prev = null; return `<div class="tm-act">${avatar(m.from.name, 'xs')}<b>${esc(m.from.name)}</b> ${m.text ? `set status: <i>${esc(m.text)}</i>` : 'cleared their status'} <span class="dim">${fmtTime(m.ts)}</span></div>`; }
+      if (m.kind === 'activity') { prev = null; return `<div class="tm-act">${avatar(m.from.name, 'xs')}${who(m.from)} ${esc(m.text)} <span class="dim">${fmtTime(m.ts)}</span></div>`; }
+      if (m.kind === 'status') { prev = null; return `<div class="tm-act">${avatar(m.from.name, 'xs')}${who(m.from)} ${m.text ? `set status: <i>${esc(m.text)}</i>` : 'cleared their status'} <span class="dim">${fmtTime(m.ts)}</span></div>`; }
       const cont = prev && prev.from.client === m.from.client && m.ts - prev.ts < 5 * 60000;
       prev = m;
       return cont ? `<div class="tm-msg cont"><div class="tm-text">${linkify(m.text)}</div></div>`
-        : `<div class="tm-msg">${avatar(m.from.name)}<div class="tm-body"><div class="tm-meta"><b>${esc(m.from.name)}</b><span class="dim">${fmtTime(m.ts)}</span></div><div class="tm-text">${linkify(m.text)}</div></div></div>`;
+        : `<div class="tm-msg">${avatar(m.from.name)}<div class="tm-body"><div class="tm-meta">${who(m.from)}<span class="dim">${fmtTime(m.ts)}</span></div><div class="tm-text">${linkify(m.text)}</div></div></div>`;
     }).join('') || '<div class="tm-empty">No messages yet. Say what you\'re working on so nobody doubles up.<br><span class="dim">Tip: <b>/status Training on the GPU box until 3pm</b> sets your status.</span></div>';
     if (scroll || atBottom) list.scrollTop = list.scrollHeight;
   }

@@ -82,6 +82,16 @@ function askPassphrase(keyFile, m) {
   });
 }
 ipcMain.on('auth:answer', (_e, id, value) => { const fn = asks.get(id); if (fn) fn(value || null); });
+// First connection to a host key not in ~/.ssh/known_hosts (outside the tailnet): the user checks the fingerprint.
+function confirmHost(info, m) {
+  return new Promise((resolve) => {
+    const id = ++askId;
+    const timer = setTimeout(() => { asks.delete(id); resolve(false); }, 120000);
+    asks.set(id, (v) => { clearTimeout(timer); asks.delete(id); resolve(v === true); });
+    send('auth:host', id, { machine: m.name, address: info.address, host: info.host, port: info.port, fingerprint: info.fingerprint });
+  });
+}
+ipcMain.on('auth:host-answer', (_e, id, ok) => { const fn = asks.get(id); if (fn) fn(ok === true); });
 
 // ---- machines ----
 function machineCfg(id) {
@@ -94,6 +104,7 @@ function getMachine(id) {
       known: (k) => config.load().knownHosts[k],
       remember: (k, fp) => { const c = config.load(); c.knownHosts[k] = fp; config.save(c); },
       askPassphrase,
+      confirmHost,
     });
     m.on('status', (status, error, route) => {
       send('machine:status', id, status, error, route);

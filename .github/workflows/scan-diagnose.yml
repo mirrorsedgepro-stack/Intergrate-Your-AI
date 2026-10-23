@@ -19,7 +19,7 @@ jobs:
   diagnose:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
       - name: Install ClamAV + 7-Zip and update signatures
@@ -100,7 +100,7 @@ jobs:
           mkdir -p official && 7z x -y -bd electron.zip -oofficial electron.exe >/dev/null && rm electron.zip
           sha256sum official/electron.exe
       - name: Release-gate scanner on official electron.exe
-        uses: hugoalh/scan-virus-ghaction@v0.20.1
+        uses: hugoalh/scan-virus-ghaction@99c81e8991ad1074a14e5f22a21bce9be035e14e # v0.20.1
         with:
           clamav_enable: 'True'
           clamav_update: 'True'
