@@ -69,3 +69,30 @@ test('isTailnetAddress', () => {
   assert.ok(!isTailnetAddress('192.168.8.236'));
   assert.ok(!isTailnetAddress('100.200.1.1'));
 });
+
+test('invite codes only accept tailnet addresses', () => {
+  const code = encodeInvite({ machines: [{ name: 'evil', host: 'attacker.example.com', user: 'x' }, { name: 'ip', host: '203.0.113.5', user: 'x' }, { name: 'ok', host: '100.101.2.3', user: 'jcee' }] });
+  assert.deepStrictEqual(decodeInvite(code).machines.map((m) => m.host), ['100.101.2.3']);
+  assert.throws(() => decodeInvite(encodeInvite({ machines: [{ host: 'lan-box.local', user: 'x' }] })), /Tailscale/);
+});
+
+test('matchDevices: tailnet name first, ambiguous hostnames and this PC are never matched', () => {
+  const { matchDevices } = require('../lib/tailscale');
+  const devices = [
+    { id: 'pc', name: 'my-pc.tail1.ts.net', hostname: 'spark1', tags: [] },
+    { id: 's1', name: 'spark1.tail1.ts.net', hostname: 'spark1', tags: [] },
+    { id: 'a', name: 'dup-a.tail1.ts.net', hostname: 'dup', tags: [] },
+    { id: 'b', name: 'dup-b.tail1.ts.net', hostname: 'dup', tags: [] },
+  ];
+  const [byName, byHost, dup, spoof] = matchDevices(devices, [
+    { machineId: 'm1', hostname: 'whatever', tsHost: 'spark1.tail1.ts.net' },
+    { machineId: 'm2', hostname: 'spark1' },
+    { machineId: 'm3', hostname: 'dup' },
+    { machineId: 'm4', hostname: 'my-pc', tsHost: 'my-pc.tail1.ts.net' },
+  ], 'my-pc.tail1.ts.net.');
+  assert.strictEqual(byName.device.id, 's1');
+  assert.strictEqual(byHost.device.id, 's1', 'this PC (same hostname) is excluded, leaving one match');
+  assert.strictEqual(dup.device, null);
+  assert.strictEqual(dup.ambiguous, true);
+  assert.strictEqual(spoof.device, null, 'never tag this PC');
+});

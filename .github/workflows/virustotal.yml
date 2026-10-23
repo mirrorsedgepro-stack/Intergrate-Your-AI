@@ -27,10 +27,12 @@ jobs:
         run: '[ -n "$VT" ] || { echo "::error::Add the VT_API_KEY repository secret first"; exit 1; }'
       - name: Download installers
         run: |
-          mkdir -p dl && gh release download "${{ inputs.tag }}" --repo "$GITHUB_REPOSITORY" --dir dl --pattern '${{ inputs.pattern }}'
+          mkdir -p dl && gh release download "$IN_TAG" --repo "$GITHUB_REPOSITORY" --dir dl --pattern "$IN_PATTERN"
           ls -la dl
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IN_TAG: ${{ inputs.tag }}
+          IN_PATTERN: ${{ inputs.pattern }}
       - name: Scan with VirusTotal
         run: |
           set -euo pipefail

@@ -25,6 +25,8 @@ jobs:
       go: ${{ steps.v.outputs.go }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - id: v
         run: |
           if [ "$GITHUB_REF_TYPE" = tag ]; then
@@ -72,6 +74,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v5
         with:
           node-version: 22

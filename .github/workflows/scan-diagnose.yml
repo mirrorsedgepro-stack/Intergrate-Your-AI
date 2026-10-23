@@ -20,6 +20,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - name: Install ClamAV + 7-Zip and update signatures
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq clamav p7zip-full >/dev/null
@@ -29,11 +31,13 @@ jobs:
       - name: Download installers
         run: |
           mkdir -p dl/new dl/old
-          gh release download "${{ inputs.tag }}" --repo "$GITHUB_REPOSITORY" --dir dl/new --pattern '*.exe'
-          if [ -n "${{ inputs.compare_tag }}" ]; then gh release download "${{ inputs.compare_tag }}" --repo "$GITHUB_REPOSITORY" --dir dl/old --pattern '*.exe'; fi
+          gh release download "$IN_TAG" --repo "$GITHUB_REPOSITORY" --dir dl/new --pattern '*.exe'
+          if [ -n "$IN_COMPARE" ]; then gh release download "$IN_COMPARE" --repo "$GITHUB_REPOSITORY" --dir dl/old --pattern '*.exe'; fi
           sha256sum dl/*/*
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IN_TAG: ${{ inputs.tag }}
+          IN_COMPARE: ${{ inputs.compare_tag }}
       - name: Scan the installers as shipped
         run: clamscan --no-summary --infected dl/new dl/old || true
       - name: Unpack the NSIS installers and scan every file inside
@@ -65,11 +69,13 @@ jobs:
       - name: Download and unpack the installer
         shell: bash
         run: |
-          mkdir -p dl && gh release download "${{ inputs.tag }}" --repo "$GITHUB_REPOSITORY" --dir dl --pattern '*.exe'
+          mkdir -p dl && gh release download "$IN_TAG" --repo "$GITHUB_REPOSITORY" --dir dl --pattern '*.exe'
           7z x -y -bd dl/*.exe -ox >/dev/null && 7z x -y -bd 'x/$PLUGINSDIR/app-64.7z' -ox/app >/dev/null
           sha256sum dl/*.exe x/app/Nexus.exe
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IN_TAG: ${{ inputs.tag }}
+          IN_COMPARE: ${{ inputs.compare_tag }}
       - name: Microsoft Defender scan
         shell: pwsh
         run: |

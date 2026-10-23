@@ -98,7 +98,8 @@
   function presetIcon(presetId, machineId) {
     const key = presetById(presetId).icon || presetId;
     if (key === 'shell') return logo(machineId && machineById(machineId).os === 'windows' ? 'powershell' : 'terminal');
-    return LOGO[key] ? logo(key) : (I[key] || I.shell);
+    const own = (o) => Object.prototype.hasOwnProperty.call(o, key); // ids can come from other people's presence
+    return own(LOGO) ? logo(key) : own(I) ? I[key] : I.shell;
   }
   const glyph = (presetId, cls = '', machineId = null) => `<span class="glyph ${cls}" style="--c:${presetById(presetId).color}">${presetIcon(presetId, machineId)}</span>`;
   function machineIconKey(m) {
@@ -155,7 +156,12 @@
     const search = new SearchAddon.SearchAddon();
     term.loadAddon(fit);
     term.loadAddon(search);
-    term.loadAddon(new WebLinksAddon.WebLinksAddon((_e, uri) => window.open(uri)));
+    // Links in terminal output open on Ctrl/Cmd+click only: output comes from remote machines and agents, and a stray
+    // click shouldn't open a page someone else chose.
+    term.loadAddon(new WebLinksAddon.WebLinksAddon((e, uri) => {
+      if (IS_MAC ? e.metaKey : e.ctrlKey) window.open(uri);
+      else toast(`${IS_MAC ? '⌘' : 'Ctrl'}+click to open ${uri.length > 60 ? uri.slice(0, 57) + '…' : uri}`, '', 2500);
+    }));
     term.loadAddon(new Unicode11Addon.Unicode11Addon());
     term.unicode.activeVersion = '11';
     term.open(host);
@@ -173,7 +179,7 @@
       spec: { raw: extra.raw, cmd: extra.cmd, script: extra.script, scriptMachine: extra.scriptMachine, readOnly: extra.readOnly },
       readOnly: !!extra.readOnly, announce: !!extra.announce,
       pid: null, status: 'starting', activity: 'idle', title: '',
-      lastData: 0, lastInput: 0, burst: 0, quietUntil: 0, busySince: 0,
+      lastData: 0, lastInput: 0, lastPointer: 0, burst: 0, quietUntil: 0, busySince: 0,
       promptLine: null, retry: 0, retryTimer: null,
     };
     wireSession(s);
@@ -217,9 +223,17 @@
     term.parser.registerOscHandler(777, (data) => { const [kind, , body] = data.split(';'); if (kind === 'notify') signal(body); return true; });
     // OSC 52 clipboard writes: full-screen apps (Claude Code) copy their own mouse selections this way, through
     // tmux. Writes only; clipboard reads ("?") are ignored so remote programs can't see your clipboard.
+    // Accepted only right after you clicked or typed in this pane: otherwise any output (a file being cat'ed, a web
+    // page an agent fetched, a hostile remote) could silently swap your clipboard for a command you'd then paste.
     term.parser.registerOscHandler(52, (data) => {
       const b64 = data.slice(data.indexOf(';') + 1);
       if (!b64 || b64 === '?') return true;
+      const t = now();
+      if (!isVisible(s) || !S.winFocused || (t - s.lastPointer > 3000 && t - s.lastInput > 3000)) {
+        toast(`Blocked a clipboard write from ${s.name} (it didn't follow a click or keypress in that pane)`, 'warn', 4000);
+        return true;
+      }
+      if (b64.length > 4 * 1024 * 1024) { toast(`Ignored an oversized clipboard write from ${s.name}`, 'warn'); return true; }
       try {
         const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
         const text = new TextDecoder().decode(bytes);
@@ -229,6 +243,7 @@
     });
     // When the app owns the mouse (Claude's full-screen UI), plain drags go to the app. Shift+drag still
     // selects in Nexus; say so once.
+    for (const ev of ['mousedown', 'mouseup']) s.host.addEventListener(ev, () => { s.lastPointer = now(); }, true);
     s.host.addEventListener('mousedown', (e) => {
       if (e.button !== 0 || e.shiftKey || S.mouseTipShown || term.modes.mouseTrackingMode === 'none') return;
       S.mouseTipShown = true;
@@ -1674,7 +1689,8 @@
     return peers.find((p) => hn && (p.hostName || '').toLowerCase() === hn)
       || peers.find((p) => m.tsHost && (p.dnsName === m.tsHost || p.ips.includes(m.tsHost)));
   };
-  const sparkArgs = () => sshMachines().map((m) => ({ machineId: m.id, hostname: (S.mstate[m.id] || {}).hostname || '' })).filter((x) => x.hostname);
+  const sparkArgs = () => sshMachines().filter((m) => !m.invited)
+    .map((m) => ({ machineId: m.id, hostname: (S.mstate[m.id] || {}).hostname || '', tsHost: m.tsHost || '' })).filter((x) => x.hostname || x.tsHost);
   const sshUsersFor = () => [...new Set(sshMachines().map((m) => m.user).filter(Boolean))];
 
   async function refreshShare({ overview = true } = {}) {
@@ -1768,6 +1784,7 @@
       } else {
         const tagged = SH.overview && SH.overview.sparks.length && SH.overview.sparks.every((s) => s.device && s.device.tags.includes(SH.overview.tag));
         rules = `<p>Guests get SSH to these machines only, as ${sshUsersFor().map((u) => `<span class="mono">${esc(u)}</span>`).join(' / ')}, through Tailscale SSH: no keys to hand out, and removing a guest cuts access straight away. Your own access stays unchanged.</p>`
+          + `<p class="warn small"><b>Guests log in as these same accounts.</b> They can read everything those accounts can: files, SSH keys, Claude / Antigravity / OpenClaw sign-ins, and your tmux sessions (read-only watching is a courtesy, not a lock). They could also leave something behind that keeps running after you remove them. Invite only people you'd trust with that account. Safer: share machines whose User is a dedicated, unprivileged account (no sudo, no personal sign-ins or keys).</p>`
           + `<div class="sh-inline"><button class="btn sm ${tagged ? '' : 'primary'}" data-sh="plan">${tagged ? 'Re-check access rules' : 'Review access rules…'}</button>${tagged ? '<span class="chip" style="--mc:#73daca">Machines tagged and locked down</span>' : ''}</div>`;
       }
     }
@@ -1890,10 +1907,20 @@
     if (act === 'joincode') return busy('join', async () => {
       const r = await api.tsDecodeInvite($('#sh-code').value);
       if (!r.ok) throw new Error(r.error);
+      const fresh = r.machines.filter((x) => !S.cfg.machines.some((m) => m.host === x.host || m.tsHost === x.host));
+      if (!fresh.length) { toast('Those machines are already in Nexus', 'ok'); return; }
+      // Show exactly where this code points before connecting: Nexus will log in there, run sessions there, and may
+      // host team chat there. Only accept codes from someone you know, received over a channel you trust.
+      const ok = await choose({
+        title: 'Add these machines?',
+        desc: `This invite${r.tailnet ? ` (tailnet ${r.tailnet})` : ''} adds: ${fresh.map((x) => `${x.name} = ${x.user || '?'}@${x.host}`).join(', ')}. `
+          + 'Nexus will connect to them over Tailscale SSH without offering your SSH keys. Anything you type, paste or drop into their sessions goes to those machines. Only continue if you were expecting this invite.',
+        options: [{ label: 'Cancel', value: false, ghost: true }, { label: 'Add machines', value: true, primary: true }],
+      });
+      if (!ok) return;
       let added = 0;
-      for (const x of r.machines) {
-        if (S.cfg.machines.some((m) => m.host === x.host || m.tsHost === x.host)) continue;
-        S.cfg.machines.push({ id: `ts-${Date.now().toString(36)}${added}`, name: x.name, type: 'ssh', os: 'linux', host: x.host, tsHost: x.host, port: 22, user: x.user, keyPath: '', color: '#76B900', icon: x.icon || '' });
+      for (const x of fresh) {
+        S.cfg.machines.push({ id: `ts-${Date.now().toString(36)}${added}`, name: x.name, type: 'ssh', os: 'linux', host: x.host, tsHost: x.host, port: 22, user: x.user, keyPath: '', color: '#76B900', icon: x.icon || '', invited: true });
         added++;
       }
       S.cfg = await api.saveConfig(S.cfg);
@@ -2014,7 +2041,7 @@
     if (!people.length) return 'open';
     return choose({
       title: `${people.join(', ')} ${people.length > 1 ? 'are' : 'is'} in this session`,
-      desc: `${tmux} on ${machineById(machineId).name} is open in ${people.join(' and ')}'s Nexus. If you both type, your keystrokes mix into the same prompt. Watch it read-only, or open it anyway (say so in team chat).`,
+      desc: `${tmux} on ${machineById(machineId).name} is open in ${people.join(' and ')}'s Nexus. If you both type, your keystrokes mix into the same prompt. Watch it read-only, or open it anyway (say so in team chat). Read-only stops your own keystrokes reaching it; it isn't a permission boundary between people sharing an account.`,
       options: [{ label: 'Cancel', value: null, ghost: true }, { label: 'Open anyway', value: 'open' }, { label: 'Watch read-only', value: 'watch', primary: true }],
     });
   }
@@ -2057,7 +2084,7 @@
   const toggleTeam = () => (TM.open ? closeTeam() : openTeam());
 
   const fmtTime = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  const linkify = (t) => esc(t).replace(/https?:\/\/[^\s<]+/g, (u) => `<a href="${u}" target="_blank">${u}</a>`)
+  const linkify = (t) => esc(t).replace(/https?:\/\/[^\s<]+/g, (u) => `<a href="${u}" target="_blank" rel="noopener noreferrer">${u}</a>`)
     .replace(/(^|\s)(@[\w.-]+)/g, '$1<b class="mention">$2</b>');
 
   function renderTeam(scroll = false) {

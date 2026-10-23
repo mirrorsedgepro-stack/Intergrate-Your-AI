@@ -83,6 +83,11 @@ login users; no keys or tokens.
 > Tip: Tailscale SSH and Nexus's own SSH key setup don't need password logins. If you enabled `PasswordAuthentication`
 > on a machine to get started, consider turning it off again once your key works.
 
+> **Security:** guests log in as the machine's configured user, so they can read anything that account can (files,
+> SSH keys, agent sign-ins, tmux sessions) and could leave a process running after removal. Share machines whose User
+> is a dedicated, unprivileged account. Invite codes only accept tailnet addresses, Nexus asks before adding them, and
+> it never offers your SSH keys to invited machines.
+
 ## Team chat and deconfliction
 
 Open with the chat icon in the title bar (Ctrl+Shift+M / ⌘⇧M). Everyone using the same machines lands in the same chat
@@ -94,6 +99,7 @@ Settings) and travels over each person's existing SSH connection, so there's no 
 - **Before you collide:** opening a session someone else has open asks first, offering **Watch read-only**
   (`tmux attach -r`). Starting an agent in a folder where someone's agent already runs warns you and offers to
   message them. Optionally, Nexus posts "started Claude in ~/project on gpu-box" when you launch an agent.
+- **Read-only watching** stops your own keystrokes reaching a session; it isn't a permission boundary between people sharing an account. Anyone who can write to the hub machine can post as any name.
 - **@mentions** raise a notification. The chat keeps the last ~2000 messages.
 
 ## How it works

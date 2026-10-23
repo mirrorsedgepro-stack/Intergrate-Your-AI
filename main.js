@@ -18,6 +18,36 @@ const SCRIPTS_DIR = path.join(__dirname, 'scripts').replace(`app.asar${path.sep}
 const ICON = path.join(__dirname, 'assets', 'icon.png');
 
 let win = null;
+
+// ---- security helpers ----
+// Only web links leave the app. Anything else (file:, smb:, ms-*, custom protocol handlers) is a classic Electron
+// path to code execution when a page or terminal output gets to choose the URL.
+function openExternalSafe(url) {
+  let u;
+  try { u = new URL(String(url)); } catch { return false; }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return false;
+  shell.openExternal(u.toString()).catch(() => {});
+  return true;
+}
+// IPC is only accepted from our own top-level renderer page (not from an iframe, a navigated page or another window).
+const RENDERER_URL = require('url').pathToFileURL(path.join(__dirname, 'renderer', 'index.html')).toString();
+function trustedSender(e) {
+  try {
+    if (!win || win.isDestroyed() || e.sender !== win.webContents) return false;
+    const f = e.senderFrame;
+    return !!f && f === win.webContents.mainFrame && f.url.split(/[?#]/)[0] === RENDERER_URL;
+  } catch { return false; }
+}
+for (const kind of ['handle', 'on']) {
+  const orig = ipcMain[kind].bind(ipcMain);
+  ipcMain[kind] = (channel, fn) => orig(channel, (e, ...args) => {
+    if (!trustedSender(e)) {
+      console.warn(`[nexus] blocked IPC "${channel}" from an untrusted sender`);
+      return kind === 'handle' ? Promise.reject(new Error('Untrusted sender')) : undefined;
+    }
+    return fn(e, ...args);
+  });
+}
 const sessions = new Map(); // id -> { write, resize, close, machineId, tmuxName }
 const machines = new Map(); // id -> Machine
 let nextId = 1;
@@ -98,6 +128,9 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
+      webviewTag: false,
+      navigateOnDragDrop: false,
       spellcheck: false,
     },
   });
@@ -111,8 +144,10 @@ function createWindow() {
   });
   win.on('focus', () => send('app:focus', true));
   win.on('blur', () => send('app:focus', false));
-  win.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
+  win.webContents.setWindowOpenHandler(({ url }) => { openExternalSafe(url); return { action: 'deny' }; });
   win.webContents.on('will-navigate', (e) => e.preventDefault());
+  win.webContents.on('will-redirect', (e) => e.preventDefault());
+  win.webContents.on('will-attach-webview', (e) => e.preventDefault());
 }
 
 // ---- auto-update (installed builds only; releases on GitHub) ----
@@ -159,7 +194,19 @@ async function addWslMachines() {
   if (changed) config.save(c);
 }
 
+app.on('web-contents-created', (_e, wc) => {
+  // Belt and braces for any future window: no new windows, no navigation away from the app.
+  wc.setWindowOpenHandler(({ url }) => { openExternalSafe(url); return { action: 'deny' }; });
+  wc.on('will-navigate', (e) => e.preventDefault());
+});
+
 app.whenReady().then(async () => {
+  // The renderer needs no web permissions (camera, mic, geolocation, notifications, clipboard-read…): notifications
+  // and the clipboard go through the main process.
+  const { session } = require('electron');
+  session.defaultSession.setPermissionRequestHandler((_wc, _perm, cb) => cb(false));
+  session.defaultSession.setPermissionCheckHandler(() => false);
+  cleanPasteDir();
   await Promise.all([platform.loadLoginShellPath(), addWslMachines().catch(() => {})]);
   createWindow();
   setupUpdates();
@@ -194,11 +241,12 @@ ipcMain.handle('config:save', (_e, cfg) => {
   }
   return publicConfig();
 });
-// Merge top-level keys (workspaces, lastSession, recentDirs…) without touching the rest.
+// Merge top-level keys (workspaces, lastSession, recentDirs…) without touching the rest. Only these keys: patching
+// knownHosts (pinned SSH host keys), machines or presets (commands) must go through config:save, which keeps knownHosts.
+const PATCHABLE = new Set(['workspaces', 'lastSession', 'recentDirs', 'collab']);
 ipcMain.handle('config:patch', (_e, patch) => {
   const c = config.load();
-  delete patch.tailscale;
-  Object.assign(c, patch);
+  for (const k of Object.keys(patch || {})) if (PATCHABLE.has(k)) c[k] = patch[k];
   config.save(c);
   return true;
 });
@@ -208,7 +256,7 @@ ipcMain.on('app:devtools', () => win && win.webContents.toggleDevTools());
 ipcMain.on('app:reload', () => win && win.webContents.reloadIgnoringCache());
 // Electron 44's clipboard is asynchronous (W3C-style read()/readText()/writeText()); readImage() is gone.
 ipcMain.handle('clipboard:read', () => clipboard.readText());
-ipcMain.on('clipboard:write', (_e, text) => { Promise.resolve(clipboard.writeText(String(text))).catch(() => {}); });
+ipcMain.on('clipboard:write', (_e, text) => { Promise.resolve(clipboard.writeText(String(text).slice(0, 4 * 1024 * 1024))).catch(() => {}); });
 // The first image on the clipboard (a Win+Shift+S / PrtScn screenshot, a copied image) as { data, ext }, or null.
 async function clipboardImage() {
   for (const item of await clipboard.read()) {
@@ -219,7 +267,7 @@ async function clipboardImage() {
 }
 ipcMain.on('app:notify', (_e, { title, body, sessionId }) => {
   if (!Notification.isSupported()) return;
-  const n = new Notification({ title, body, icon: ICON });
+  const n = new Notification({ title: String(title || '').slice(0, 120), body: String(body || '').slice(0, 300), icon: ICON });
   n.on('click', () => {
     if (!win) return;
     if (win.isMinimized()) win.restore();
@@ -275,9 +323,14 @@ ipcMain.handle('local:dirs', safe(async () => {
 
 // ---- IPC: Tailscale (sharing SSH machines with guests) ----
 // The API token is encrypted with the OS (DPAPI via safeStorage) and never leaves the main process.
+// On Linux without a keyring, safeStorage "encrypts" with a hard-coded key (backend basic_text): not a secret.
+function secureStorageOk() {
+  if (!safeStorage.isEncryptionAvailable()) return false;
+  try { return process.platform !== 'linux' || safeStorage.getSelectedStorageBackend() !== 'basic_text'; } catch { return true; }
+}
 function tsToken() {
   const enc = (config.load().tailscale || {}).token;
-  if (!enc || !safeStorage.isEncryptionAvailable()) return null;
+  if (!enc || !secureStorageOk()) return null;
   try { return safeStorage.decryptString(Buffer.from(enc, 'base64')); } catch { return null; }
 }
 function tsApi() {
@@ -285,28 +338,22 @@ function tsApi() {
   if (!t) throw new Error('Add a Tailscale API access token first');
   return new tailscale.TailscaleApi(t);
 }
-// Match configured SSH machines to tailnet devices by hostname (as reported by the probe).
-function matchDevices(devices, machines) {
-  return machines.map((m) => {
-    const d = devices.find((x) => (x.hostname || '').toLowerCase() === String(m.hostname || '').toLowerCase());
-    return {
-      machineId: m.machineId,
-      hostname: m.hostname,
-      device: d ? { id: d.id || d.nodeId, name: d.name, addresses: d.addresses || [], tags: d.tags || [], online: !!d.connectedToControl, lastSeen: d.lastSeen } : null,
-    };
-  });
-}
+const matchDevices = (devices, machines, self) => tailscale.matchDevices(devices, machines, self);
+const selfName = async () => { try { const l = await tailscale.localStatus(); return (l.self && l.self.dnsName) || ''; } catch { return ''; } };
+// The last previewed plan. Applying uses this copy, not whatever the renderer sends back, so only a plan the user saw
+// (and which Nexus computed) can change the tailnet.
+let lastPlan = null;
 
 ipcMain.handle('ts:status', async () => ({
   local: await tailscale.localStatus(),
   hasToken: !!tsToken(),
-  canEncrypt: safeStorage.isEncryptionAvailable(),
+  canEncrypt: secureStorageOk(),
 }));
 ipcMain.handle('ts:set-token', safe(async (_e, token) => {
   const t = String(token || '').trim();
   if (!/^tskey-api-/.test(t)) throw new Error('That does not look like an API access token (it starts with tskey-api-)');
   const devices = await new tailscale.TailscaleApi(t).devices(); // validates the token
-  if (!safeStorage.isEncryptionAvailable()) throw new Error('Windows secure storage is unavailable; the token was not saved');
+  if (!secureStorageOk()) throw new Error('Secure storage (Windows DPAPI, macOS Keychain or a Linux keyring such as gnome-keyring/KWallet) is unavailable; the token was not saved');
   const c = config.load();
   c.tailscale = { ...(c.tailscale || {}), token: safeStorage.encryptString(t).toString('base64') };
   config.save(c);
@@ -328,7 +375,7 @@ ipcMain.handle('ts:overview', safe(async (_e, machines) => {
     const inv = invites.find((x) => (x.email || '').toLowerCase() === email);
     return { email, userId: u ? u.id : null, status: u ? (u.status || 'active') : inv ? 'invited' : 'not joined', inviteId: inv ? inv.id : null, inviteUrl: inv ? inv.inviteUrl : null, lastSeen: u ? u.lastSeen : null };
   });
-  return { sparks: matchDevices(devices, machines), guests, tag: tailscale.SPARK_TAG };
+  return { sparks: matchDevices(devices, machines, await selfName()), guests, tag: tailscale.SPARK_TAG };
 }));
 
 // Preview the policy + tag changes needed to share the machines (no changes made).
@@ -339,16 +386,21 @@ ipcMain.handle('ts:plan', safe(async (_e, { machines, sshUsers, addGuest, remove
   if (addGuest) guests = [...guests, addGuest.toLowerCase()];
   if (removeGuest) guests = guests.filter((g) => g !== removeGuest.toLowerCase());
   const plan = tailscale.planPolicy(policy, { guests, sshUsers });
-  const sparks = matchDevices(devices, machines);
+  const sparks = matchDevices(devices, machines, await selfName());
   const tagChanges = sparks.filter((s) => s.device && !s.device.tags.includes(tailscale.SPARK_TAG))
-    .map((s) => ({ deviceId: s.device.id, hostname: s.hostname, tags: [...s.device.tags, tailscale.SPARK_TAG] }));
-  const changes = [...plan.changes, ...tagChanges.map((t) => `Tag ${t.hostname} as ${tailscale.SPARK_TAG}`)];
-  const missing = sparks.filter((s) => !s.device).map((s) => s.hostname);
+    .map((s) => ({ deviceId: s.device.id, hostname: s.hostname, device: s.device.name, tags: [...s.device.tags, tailscale.SPARK_TAG] }));
+  // Name the exact tailnet device being tagged (tagging gives guests SSH to it), not just the hostname it reports.
+  const changes = [...plan.changes, ...tagChanges.map((t) => `Tag ${t.device || t.hostname} as ${tailscale.SPARK_TAG} (guests get SSH to it)`)];
+  const missing = sparks.filter((s) => !s.device).map((s) => s.hostname + (s.ambiguous ? ' (several devices use this hostname: set its Tailscale address in Settings)' : ''));
+  lastPlan = { policy: plan.policy, etag, tagChanges };
   return { policy: plan.policy, etag, changes, tagChanges, missing };
 }));
 
 // Apply a previewed plan: validate the policy with Tailscale, save it (only if unchanged since the preview), tag devices.
-ipcMain.handle('ts:apply', safe(async (_e, { policy, etag, tagChanges }) => {
+ipcMain.handle('ts:apply', safe(async (_e, req) => {
+  if (!lastPlan || !req || req.etag !== lastPlan.etag) throw new Error('Review the access rules again before applying');
+  const { policy, etag, tagChanges } = lastPlan;
+  lastPlan = null;
   const api = tsApi();
   const v = await api.validatePolicy(policy);
   if (v && v.message) throw new Error(`Tailscale rejected the policy: ${v.message}${v.data ? ' ' + JSON.stringify(v.data) : ''}`);
@@ -484,6 +536,18 @@ ipcMain.handle('session:cwd', async (_e, id) => {
   try { return await getMachine(s.machineId).paneCwd(s.tmuxName); } catch { return null; }
 });
 
+// Pasted screenshots can hold anything on screen: keep them private to this user and delete them after 7 days.
+const pasteDir = () => path.join(app.getPath('temp'), 'nexus-paste');
+function cleanPasteDir() {
+  try {
+    const cutoff = Date.now() - 7 * 24 * 3600 * 1000;
+    for (const f of fs.readdirSync(pasteDir())) {
+      const p = path.join(pasteDir(), f);
+      try { if (fs.statSync(p).mtimeMs < cutoff) fs.unlinkSync(p); } catch { /* in use or gone */ }
+    }
+  } catch { /* no folder yet */ }
+}
+
 // Clipboard image -> a file the session's machine can read; returns its path for pasting.
 ipcMain.handle('session:paste-image', safe(async (_e, id) => {
   const s = sessions.get(id);
@@ -494,10 +558,10 @@ ipcMain.handle('session:paste-image', safe(async (_e, id) => {
   const name = `paste-${new Date().toISOString().replace(/[:.]/g, '-')}.${img.ext}`;
   const type = machineCfg(s.machineId).type;
   if (type === 'local' || type === 'wsl') {
-    const dir = path.join(app.getPath('temp'), 'nexus-paste');
-    fs.mkdirSync(dir, { recursive: true });
+    const dir = pasteDir();
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     const p = path.join(dir, name);
-    fs.writeFileSync(p, png);
+    fs.writeFileSync(p, png, { mode: 0o600 });
     return { path: type === 'wsl' ? platform.toWslPath(p) : p };
   }
   return { path: await getMachine(s.machineId).uploadToInbox(name, { buffer: png }) };
@@ -508,6 +572,7 @@ ipcMain.handle('session:upload-files', safe(async (_e, id, files) => {
   const s = sessions.get(id);
   if (!s) throw new Error('Session is not running');
   const type = machineCfg(s.machineId).type;
+  if (!Array.isArray(files) || !files.length || files.length > 50) throw new Error('Drop between 1 and 50 files');
   // Check every file before uploading any, so a folder in the drop doesn't leave half the files uploaded.
   for (const f of files) {
     const st = fs.statSync(f);
