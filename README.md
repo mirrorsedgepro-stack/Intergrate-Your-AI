@@ -83,6 +83,11 @@ login users; no keys or tokens.
 > Tip: Tailscale SSH and Nexus's own SSH key setup don't need password logins. If you enabled `PasswordAuthentication`
 > on a machine to get started, consider turning it off again once your key works.
 
+> **Security:** guests log in as the machine's configured user, so they can read anything that account can (files,
+> SSH keys, agent sign-ins, tmux sessions) and could leave a process running after removal. Share machines whose User
+> is a dedicated, unprivileged account. Invite codes only accept tailnet addresses, Nexus asks before adding them, and
+> it never offers your SSH keys to invited machines.
+
 ## Team chat and deconfliction
 
 Open with the chat icon in the title bar (Ctrl+Shift+M / ⌘⇧M). Everyone using the same machines lands in the same chat
@@ -94,6 +99,7 @@ Settings) and travels over each person's existing SSH connection, so there's no 
 - **Before you collide:** opening a session someone else has open asks first, offering **Watch read-only**
   (`tmux attach -r`). Starting an agent in a folder where someone's agent already runs warns you and offers to
   message them. Optionally, Nexus posts "started Claude in ~/project on gpu-box" when you launch an agent.
+- **Read-only watching** stops your own keystrokes reaching a session; it isn't a permission boundary between people sharing an account. Anyone who can write to the hub machine can post as any name.
 - **@mentions** raise a notification. The chat keeps the last ~2000 messages.
 
 ## How it works
@@ -102,7 +108,7 @@ Settings) and travels over each person's existing SSH connection, so there's no 
 |---|---|
 | Local sessions | ConPTY via `node-pty` (PowerShell, Git Bash, `claude`, `agy`) |
 | Remote sessions | `ssh2`: one connection per machine, one channel per session, each in its own tmux session on a private tmux server (`tmux -L nexus`) configured to be invisible: no status bar, no mouse capture, native scrollback. |
-| SSH trust | Host keys are checked against `~/.ssh/known_hosts` (including hashed entries and `UserKnownHostsFile` from `~/.ssh/config`); unknown hosts are pinned on first use. Keys come from Settings, `~/.ssh/config` `IdentityFile`s, the default key files, then the Windows OpenSSH agent. Passphrase-protected keys prompt once per run. |
+| SSH trust | Host keys are checked against `~/.ssh/known_hosts` (including hashed entries and `UserKnownHostsFile` from `~/.ssh/config`). A host key Nexus hasn't seen before asks you to confirm its fingerprint once (tailnet addresses, already authenticated by WireGuard, are pinned without asking); a changed key is refused. Keys come from Settings, `~/.ssh/config` `IdentityFile`s, the default key files, then the Windows OpenSSH agent. Passphrase-protected keys prompt once per run. |
 | Agent exits | You drop into your normal shell in the same pane. |
 | Config | `%APPDATA%\Nexus\config.json` (machines, presets, workspaces, appearance, pinned host keys) |
 
@@ -144,6 +150,13 @@ npm run dist    # build dist/Nexus-Setup-<version>.exe
 ```
 
 CI runs the tests on Windows, macOS and Linux on every push. To publish a release, bump `version` in `package.json` and push it to main (or push a matching tag, `git tag v1.3.1 && git push --tags`). The Release workflow builds the Windows, macOS and Linux installers into a **draft** release, then `verify-and-publish.yml` scans them: **VirusTotal** (~70 engines, every installer) and **Microsoft Defender** (Windows installer) must both be clean, and ClamAV ([hugoalh/scan-virus-ghaction](https://github.com/hugoalh/scan-virus-ghaction)) runs as a reported check. Only then is the release published, with the VirusTotal reports, the scan log and SHA-256 checksums in its notes. (The ClamAV bundled in that action, 1.0.3 with 2023 signatures, flags the official Electron runtime itself as `Win.Trojan.Virut`, so it can't gate an Electron app.) The workflow needs a `VT_API_KEY` repository secret. Installed copies update from it.
+
+**Code signing (optional):** add repository secrets and the Release workflow signs automatically; without them builds
+stay unsigned. Windows: `WIN_CSC_LINK` (base64 .pfx) + `WIN_CSC_KEY_PASSWORD`. macOS: `MAC_CSC_LINK` (base64 Developer ID
+.p12) + `MAC_CSC_KEY_PASSWORD`, plus `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID` for notarization.
+(New Windows OV/EV certificates are issued on hardware tokens or cloud HSMs; for those, configure electron-builder's
+`win.azureSignOptions` or a custom `win.sign` instead of a .pfx.) Workflow actions are pinned to commit SHAs and kept
+current by Dependabot.
 
 ## Credits
 

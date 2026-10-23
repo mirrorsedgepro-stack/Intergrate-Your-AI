@@ -88,3 +88,29 @@ test('Claude alert hooks: added once, existing settings preserved', () => {
   assert.strictEqual(s.hooks.Notification.length, 1);
   assert.strictEqual(s.hooks.Stop[1].hooks[0].command, String.raw`printf '\a' > /dev/tty 2>/dev/null || true`);
 });
+
+test('first-seen host keys: confirmed off the tailnet, pinned silently on it', () => {
+  const crypto = require('crypto');
+  const { Machine } = require('../lib/remote');
+  const t = Buffer.from('ssh-ed25519'), k = crypto.randomBytes(32);
+  const len = (n) => { const b = Buffer.alloc(4); b.writeUInt32BE(n); return b; };
+  const blob = Buffer.concat([len(t.length), t, len(k.length), k]);
+  const pinned = {};
+  const store = { get: () => null, known: (x) => pinned[x], remember: (x, fp) => { pinned[x] = fp; }, confirmHost: async () => true };
+  const m = { host: 'nexus-test-host.invalid', user: 'u', port: 22 };
+
+  const mach = new Machine('t', store);
+  assert.strictEqual(mach.authOptions(m, m.host).hostVerifier(blob), false, 'LAN host not trusted without asking');
+  assert.strictEqual(mach.unknownHost.key, 'nexus-test-host.invalid:22');
+  assert.match(mach.unknownHost.fingerprint, /^SHA256:/);
+  assert.deepStrictEqual(pinned, {});
+
+  assert.strictEqual(mach.authOptions(m, 'box.tail1.ts.net').hostVerifier(blob), true, 'tailnet host pinned');
+  assert.ok(pinned['box.tail1.ts.net:22']);
+
+  pinned['nexus-test-host.invalid:22'] = mach.unknownHost.fingerprint; // the user trusted it
+  assert.strictEqual(mach.authOptions(m, m.host).hostVerifier(blob), true);
+
+  const legacy = new Machine('l', { ...store, confirmHost: undefined });
+  assert.strictEqual(legacy.authOptions({ ...m, host: 'other-host.invalid' }, 'other-host.invalid').hostVerifier(blob), true, 'no prompt available: old trust-on-first-use');
+});

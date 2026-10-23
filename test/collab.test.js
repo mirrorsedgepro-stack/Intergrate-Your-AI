@@ -42,3 +42,8 @@ test('conflicts: same tmux session, same agent folder, ignores self and other ac
   // my own sessions never conflict with me
   assert.deepStrictEqual(conflicts(presence, 'me', { host: 'spark1-aresj', user: 'jcee', tmux: 'nx-claude-mine' }).sameSession, []);
 });
+
+test('presence presets from others are reduced to plain ids', () => {
+  const p = makePresence({ client: 'x', sessions: [{ preset: '__proto__' }, { preset: '<img src=x>' }, { preset: 'claude' }] });
+  assert.deepStrictEqual(p.sessions.map((s) => s.preset), ['shell', 'shell', 'claude']);
+});

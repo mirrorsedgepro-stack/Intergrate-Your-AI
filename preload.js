@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld('nexus', {
   pathForFile: (file) => webUtils.getPathForFile(file),
   installUpdate: () => ipcRenderer.send('update:install'),
   answerPassphrase: (id, value) => ipcRenderer.send('auth:answer', id, value),
+  answerHost: (id, ok) => ipcRenderer.send('auth:host-answer', id, ok === true),
 
   probeLocal: () => ipcRenderer.invoke('local:probe'),
   localDirs: () => ipcRenderer.invoke('local:dirs'),
@@ -67,6 +68,7 @@ contextBridge.exposeInMainWorld('nexus', {
   onNotifyClick: on('notify:click'),
   onFocus: on('app:focus'),
   onAuthAsk: on('auth:ask'),
+  onHostAsk: on('auth:host'),
   onUpdateReady: on('update:ready'),
   onUpdateAvailable: on('update:available'),
 });

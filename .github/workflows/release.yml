@@ -24,7 +24,9 @@ jobs:
       tag: ${{ steps.v.outputs.tag }}
       go: ${{ steps.v.outputs.go }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - id: v
         run: |
           if [ "$GITHUB_REF_TYPE" = tag ]; then
@@ -71,17 +73,42 @@ jobs:
             args: --linux --arm64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 22
           cache: npm
       - run: npm ci
       - run: npm test
-      - run: npx electron-builder ${{ matrix.args }} --publish always
+      # Code signing is used when its secrets exist, so updates and SmartScreen/Gatekeeper can verify the publisher.
+      # Without them the build stays unsigned, as before. Secrets: WIN_CSC_LINK + WIN_CSC_KEY_PASSWORD (Windows .pfx,
+      # base64), MAC_CSC_LINK + MAC_CSC_KEY_PASSWORD (Developer ID .p12, base64), APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD
+      # + APPLE_TEAM_ID (notarization).
+      - name: Build, sign (if configured) and upload installers
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          for v in WIN_CSC_LINK WIN_CSC_KEY_PASSWORD CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            [ -n "${!v}" ] || unset "$v"
+          done
+          if [ "$RUNNER_OS" = macOS ] && [ -n "${CSC_LINK:-}" ]; then
+            # package.json pins mac.identity to null (unsigned); drop that for this build so the certificate is used.
+            node -e 'const f="package.json",p=require("./"+f);delete p.build.mac.identity;require("fs").writeFileSync(f,JSON.stringify(p,null,2))'
+            echo "Signing the macOS build"
+          fi
+          [ "$RUNNER_OS" = Windows ] && [ -n "${WIN_CSC_LINK:-}" ] && echo "Signing the Windows build"
+          npx electron-builder ${{ matrix.args }} --publish always
 
   # VirusTotal + Microsoft Defender gate (blocking) and ClamAV (reported), then publish: see verify-and-publish.yml.
   verify:
