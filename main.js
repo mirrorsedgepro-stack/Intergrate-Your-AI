@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, clipboard, shell, Notification, Menu, safeStorage } = require('electron');
+const { app, BrowserWindow, ipcMain, clipboard, shell, Notification, Menu, safeStorage, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -465,6 +465,32 @@ ipcMain.handle('ts:decode-invite', safe(async (_e, code) => {
   return tailscale.decodeInvite(code, local);
 }));
 
+// ---- IPC: workspace / preset export and import (a JSON file you can hand to a teammate) ----
+// The file carries workspaces, presets and a machine index (name/host) so sessions can be re-pointed at the
+// importer's own machines. No addresses are required to match: unmatched sessions are skipped, not guessed.
+ipcMain.handle('app:export-workspaces', safe(async () => {
+  const c = config.load();
+  const { filePath } = await dialog.showSaveDialog(win, { title: 'Export workspaces and presets', defaultPath: path.join(app.getPath('documents'), 'nexus-workspaces.json'), filters: [{ name: 'JSON', extensions: ['json'] }] });
+  if (!filePath) return { cancelled: true };
+  const data = {
+    nexus: 1, exportedAt: new Date().toISOString(),
+    presets: (c.presets || []).map(({ id, name, color, icon, cmd, only }) => ({ id, name, color, icon, cmd, only })),
+    workspaces: c.workspaces || [],
+    machines: (c.machines || []).map((m) => ({ id: m.id, name: m.name, type: m.type, host: m.host || '', tsHost: m.tsHost || '', hostname: m.hostname || '' })),
+  };
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+  return { path: filePath, workspaces: data.workspaces.length, presets: data.presets.length };
+}));
+ipcMain.handle('app:import-workspaces', safe(async () => {
+  const { filePaths } = await dialog.showOpenDialog(win, { title: 'Import workspaces and presets', filters: [{ name: 'JSON', extensions: ['json'] }], properties: ['openFile'] });
+  if (!filePaths || !filePaths.length) return { cancelled: true };
+  const raw = fs.readFileSync(filePaths[0], 'utf8');
+  if (raw.length > 4 * 1024 * 1024) throw new Error('That file is too large to be a Nexus export');
+  const data = JSON.parse(raw);
+  if (!data || data.nexus !== 1) throw new Error('Not a Nexus export file');
+  return { data: { presets: Array.isArray(data.presets) ? data.presets : [], workspaces: Array.isArray(data.workspaces) ? data.workspaces : [], machines: Array.isArray(data.machines) ? data.machines : [] } };
+}));
+
 // ---- IPC: port forwarding (ssh -L over the machine's connection) ----
 const tunnels = new Map(); // id -> { machineId, t: Tunnel }
 let nextTunnel = 1;
@@ -509,6 +535,21 @@ ipcMain.handle('collab:post', safe(async (_e, { from, text, kind }) => {
   if (!m.text) throw new Error('Empty message');
   await hub.ch.post(m);
   return { id: m.id };
+}));
+// Team presets: one JSON file on the hub so everyone launches the same commands. Untrusted content: presets are
+// commands, so the importer reviews and confirms them in the renderer before they become theirs.
+ipcMain.handle('collab:presets-get', safe(async () => {
+  if (!hub) throw new Error('Team chat is not connected');
+  const r = await hub.ch.machine.exec('cat ~/.nexus/collab/presets.json 2>/dev/null || echo "[]"');
+  const list = JSON.parse(r.stdout || '[]');
+  return { presets: Array.isArray(list) ? list.slice(0, 50) : [] };
+}));
+ipcMain.handle('collab:presets-put', safe(async (_e, presets) => {
+  if (!hub) throw new Error('Team chat is not connected');
+  const clean = (Array.isArray(presets) ? presets : []).slice(0, 50).map(({ id, name, color, icon, cmd, only }) => ({ id, name, color, icon, cmd, only }));
+  const r = await hub.ch.machine.exec('mkdir -p ~/.nexus/collab && cat > ~/.nexus/collab/presets.json.tmp && mv -f ~/.nexus/collab/presets.json.tmp ~/.nexus/collab/presets.json', JSON.stringify(clean, null, 2));
+  if (r.code) throw new Error(r.stderr || 'could not publish');
+  return { count: clean.length };
 }));
 ipcMain.handle('collab:heartbeat', safe(async (_e, presence) => {
   if (!hub) return { presence: [] };

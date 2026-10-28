@@ -61,6 +61,10 @@ contextBridge.exposeInMainWorld('nexus', {
   tsEncodeInvite: (data) => ipcRenderer.invoke('ts:encode-invite', data),
   tsDecodeInvite: (code) => ipcRenderer.invoke('ts:decode-invite', code),
 
+  exportWorkspaces: () => ipcRenderer.invoke('app:export-workspaces'),
+  importWorkspaces: () => ipcRenderer.invoke('app:import-workspaces'),
+  collabPresetsGet: () => ipcRenderer.invoke('collab:presets-get'),
+  collabPresetsPut: (presets) => ipcRenderer.invoke('collab:presets-put', presets),
   tunnelOpen: (args) => ipcRenderer.invoke('tunnel:open', args),
   tunnelClose: (id) => ipcRenderer.invoke('tunnel:close', id),
   tunnelList: () => ipcRenderer.invoke('tunnel:list'),

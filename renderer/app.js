@@ -936,9 +936,85 @@
           run: () => openLayout(w),
         })),
         { group: 'Manage', icon: I.save, label: 'Save current layout as workspace…', run: saveWorkspace },
+        { group: 'Manage', icon: I.send, label: 'Export workspaces and presets to a file…', run: exportWorkspaces },
+        { group: 'Manage', icon: I.folder, label: 'Import workspaces and presets from a file…', run: importWorkspaces },
         ...ws.map((w) => ({ group: 'Manage', icon: I.trash, label: `Delete workspace "${w.name}"`, run: () => deleteWorkspace(w.name) })),
       ],
     });
+  }
+
+  // ---- export / import (hand your layouts and launch commands to a teammate) ----
+  async function exportWorkspaces() {
+    const r = await api.exportWorkspaces();
+    if (!r.ok) { toast(r.error, 'bad'); return; }
+    if (r.cancelled) return;
+    toast(`Exported ${r.workspaces} workspace${r.workspaces === 1 ? '' : 's'} and ${r.presets} presets`, 'ok');
+  }
+  // Map a machine from the export onto one of ours: same id, else same address, else same name. Null = skip.
+  function matchMachine(x) {
+    const ms = S.cfg.machines;
+    return ms.find((m) => m.id === x.id && (m.type === x.type || !x.type))
+      || ms.find((m) => x.host && (m.host === x.host || m.tsHost === x.host || m.tsHost === x.tsHost))
+      || ms.find((m) => x.name && m.name === x.name)
+      || (x.type === 'local' ? ms.find((m) => m.type === 'local') : null)
+      || null;
+  }
+  async function importWorkspaces() {
+    const r = await api.importWorkspaces();
+    if (!r.ok) { toast(r.error, 'bad'); return; }
+    if (r.cancelled) return;
+    const { presets, workspaces, machines } = r.data;
+    const mapId = {};
+    for (const x of machines) { const m = matchMachine(x); if (m) mapId[x.id] = m.id; }
+    const newPresets = presets.filter((p) => p && /^[a-z0-9-]{1,24}$/.test(String(p.id)) && !S.cfg.presets.some((q) => q.id === p.id));
+    const ws = [];
+    for (const w of workspaces) {
+      if (!w || !w.name || !Array.isArray(w.sessions)) continue;
+      const sessions = w.sessions.map((x) => (mapId[x.machineId] ? { ...x, machineId: mapId[x.machineId] } : null));
+      const kept = sessions.filter(Boolean);
+      if (!kept.length) continue;
+      ws.push({ ...w, name: String(w.name).slice(0, 60), sessions: kept, panes: (w.panes || []).map((i) => kept.indexOf(sessions[i])) });
+    }
+    if (!ws.length && !newPresets.length) { toast('Nothing in that file matches your machines, and it has no new presets', 'warn'); return; }
+    // Presets are commands that will run on your machines: show them before adding.
+    const ok = await choose({
+      title: 'Import?',
+      desc: `${ws.length} workspace${ws.length === 1 ? '' : 's'} (${ws.map((w) => w.name).join(', ') || 'none'})`
+        + (newPresets.length ? `, and ${newPresets.length} new preset${newPresets.length === 1 ? '' : 's'}: ${newPresets.map((p) => `${p.name} = ${Object.values(p.cmd || {}).join(' | ') || '(shell)'}`).join('; ')}. Presets are commands that run on your machines: only import ones you understand.` : '. No new presets.'),
+      options: [{ label: 'Cancel', value: false, ghost: true }, { label: 'Import', value: true, primary: true }],
+    });
+    if (!ok) return;
+    S.cfg.workspaces = [...(S.cfg.workspaces || []).filter((w) => !ws.some((x) => x.name === w.name)), ...ws];
+    await api.patchConfig({ workspaces: S.cfg.workspaces });
+    if (newPresets.length) {
+      S.cfg.presets = [...S.cfg.presets, ...newPresets.map(({ id, name, color, icon, cmd, only }) => ({ id: String(id), name: String(name || id).slice(0, 40), color: /^#[0-9a-f]{6}$/i.test(color) ? color : '#9aa3ba', icon: String(icon || '').slice(0, 24), cmd: Object.fromEntries(Object.entries(cmd || {}).filter(([k]) => ['windows', 'linux', 'mac'].includes(k)).map(([k, v]) => [k, String(v)])), ...(only ? { only } : {}) }))];
+      S.cfg = await api.saveConfig(S.cfg);
+    }
+    renderAll();
+    toast(`Imported ${ws.length} workspace${ws.length === 1 ? '' : 's'}${newPresets.length ? ` and ${newPresets.length} presets` : ''}`, 'ok');
+  }
+  // Team presets live on the chat hub (~/.nexus/collab/presets.json) so the whole team launches the same commands.
+  async function publishPresets() {
+    const r = await api.collabPresetsPut(S.cfg.presets);
+    if (!r.ok) { toast(r.error, 'bad'); return; }
+    toast(`Published ${r.count} presets to the team`, 'ok');
+    postTeam('published their launch presets (Ctrl+Shift+P → Import team presets)', 'activity');
+  }
+  async function importTeamPresets() {
+    const r = await api.collabPresetsGet();
+    if (!r.ok) { toast(r.error, 'bad'); return; }
+    const fresh = r.presets.filter((p) => p && /^[a-z0-9-]{1,24}$/.test(String(p.id)) && !S.cfg.presets.some((q) => q.id === p.id));
+    if (!fresh.length) { toast('No team presets you don\'t already have', 'ok'); return; }
+    const ok = await choose({
+      title: 'Import team presets?',
+      desc: `New: ${fresh.map((p) => `${p.name} = ${Object.values(p.cmd || {}).join(' | ') || '(shell)'}`).join('; ')}. Anyone who can write to the hub machine could have put these here; they are commands that will run on your machines.`,
+      options: [{ label: 'Cancel', value: false, ghost: true }, { label: 'Import', value: true, primary: true }],
+    });
+    if (!ok) return;
+    S.cfg.presets = [...S.cfg.presets, ...fresh.map(({ id, name, color, icon, cmd, only }) => ({ id: String(id), name: String(name || id).slice(0, 40), color: /^#[0-9a-f]{6}$/i.test(color) ? color : '#9aa3ba', icon: String(icon || '').slice(0, 24), cmd: Object.fromEntries(Object.entries(cmd || {}).filter(([k]) => ['windows', 'linux', 'mac'].includes(k)).map(([k, v]) => [k, String(v)])), ...(only ? { only } : {}) }))];
+    S.cfg = await api.saveConfig(S.cfg);
+    renderAll();
+    toast(`Imported ${fresh.length} team preset${fresh.length === 1 ? '' : 's'}`, 'ok');
   }
 
   // ---------------------------------------------------------------- folder picker
@@ -1470,6 +1546,10 @@
     cmd('Share machines over Tailscale…', openShare, '', I.send);
     cmd('Team chat', () => openTeam(), 'Ctrl+Shift+M', I.send);
     cmd('Save layout as workspace…', saveWorkspace, '', I.save);
+    cmd('Export workspaces and presets…', exportWorkspaces, '', I.send);
+    cmd('Import workspaces and presets…', importWorkspaces, '', I.folder);
+    cmd('Publish my presets to the team', publishPresets, '', I.send);
+    cmd('Import team presets…', importTeamPresets, '', I.folder);
     if (focused()) cmd(`Send last reply from ${focused().name} to…`, () => sendLastReply(focused()), 'Ctrl+Shift+S', I.send);
     cmd('Settings', openSettings, 'Ctrl+,', I.gear);
     for (const m of S.cfg.machines.filter((x) => x.type === 'ssh')) {
