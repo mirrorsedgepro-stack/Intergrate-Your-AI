@@ -10,6 +10,7 @@ const { Machine } = require('./lib/remote');
 const tailscale = require('./lib/tailscale');
 const collab = require('./lib/collab');
 const { Tunnel } = require('./lib/tunnel');
+const { McpServer } = require('./lib/mcp');
 
 if (!app.requestSingleInstanceLock()) app.quit();
 app.setAppUserModelId('com.nexus.terminal');
@@ -60,8 +61,11 @@ function send(ch, ...args) {
 // ---- output batching: coalesce chunks per session into ~4ms frames ----
 const pending = new Map();
 let flushTimer = null;
+const OUT_KEEP = 64 * 1024; // recent output per session, for the MCP read_output tool
 function emitData(id, data) {
   if (!data) return;
+  const s = sessions.get(id);
+  if (s) s.recent = ((s.recent || '') + data).slice(-OUT_KEEP);
   pending.set(id, (pending.get(id) || '') + data);
   if (!flushTimer) flushTimer = setTimeout(flush, 4);
 }
@@ -231,11 +235,13 @@ app.whenReady().then(async () => {
   await Promise.all([platform.loadLoginShellPath(), addWslMachines().catch(() => {})]);
   createWindow();
   setupUpdates();
+  syncMcp();
 });
 app.on('second-instance', () => { if (win) { if (win.isMinimized()) win.restore(); win.focus(); } });
 app.on('window-all-closed', () => {
   for (const s of sessions.values()) { try { s.close(); } catch {} }
   for (const x of tunnels.values()) x.t.stop();
+  stopMcp();
   for (const m of machines.values()) m.disconnect();
   app.quit();
 });
@@ -263,6 +269,7 @@ ipcMain.on('app:hello', () => {
 ipcMain.handle('config:save', (_e, cfg) => {
   const prev = config.load();
   config.save({ ...cfg, machines: withSecrets(cfg.machines, prev.machines), knownHosts: prev.knownHosts, window: prev.window, tailscale: prev.tailscale });
+  syncMcp();
   // Drop connections whose address changed so the next use reconnects with new settings.
   for (const [id, m] of machines) {
     const a = prev.machines.find((x) => x.id === id), b = cfg.machines.find((x) => x.id === id);
@@ -324,9 +331,9 @@ ipcMain.handle('machine:probe', safe((_e, id) => {
 ipcMain.handle('machine:stats', safe(async (_e, id) => {
   const m = machineCfg(id);
   if (!m) throw new Error('Unknown machine');
-  if (m.type === 'local') return { stats: await local.stats() };
-  if (m.type === 'wsl') return { stats: await local.wslStats(m.distro) };
-  return { stats: await getMachine(id).stats() };
+  const stats = m.type === 'local' ? await local.stats() : m.type === 'wsl' ? await local.wslStats(m.distro) : await getMachine(id).stats();
+  if (stats) lastStats.set(id, stats);
+  return { stats };
 }));
 ipcMain.handle('machine:dirs', safe((_e, id) => {
   const m = machineCfg(id);
@@ -564,6 +571,46 @@ ipcMain.handle('collab:heartbeat', safe(async (_e, presence) => {
   return { presence: await hub.ch.heartbeat(collab.makePresence(presence)) };
 }));
 
+// ---- MCP server (opt-in): local agents orchestrate Nexus ----
+let mcp = null;
+const lastStats = new Map(); // machineId -> stats (from machine:stats polls), for list_machines
+const launchWaits = new Map(); // reqId -> resolve, for launches that go through the renderer
+let launchReq = 0;
+async function startMcp() {
+  if (mcp) return;
+  const srv = new McpServer({
+    version: app.getVersion(),
+    listMachines: async () => {
+      const c = config.load();
+      return c.machines.map((m) => {
+        const mach = machines.get(m.id);
+        return { id: m.id, name: m.name, type: m.type, os: m.os, host: m.host || undefined, status: m.type === 'local' ? 'online' : (mach ? mach.status : 'offline'), stats: lastStats.get(m.id) || null };
+      });
+    },
+    listSessions: async () => [...sessions].map(([id, s]) => ({ id, machineId: s.machineId, preset: s.presetId, cwd: s.cwd, tmux: s.tmuxName || null, lastLine: require('./lib/mcp').plain(s.recent || '').trim().split('\n').pop() || '' })),
+    launch: ({ machine, preset, cwd }) => new Promise((resolve, reject) => {
+      const c = config.load();
+      const m = c.machines.find((x) => x.id === machine || x.name.toLowerCase() === machine.toLowerCase());
+      if (!m) return reject(new Error(`No machine "${machine}"`));
+      if (!c.presets.some((p) => p.id === preset)) return reject(new Error(`No preset "${preset}"`));
+      if (!win || win.isDestroyed()) return reject(new Error('Nexus window is not open'));
+      const reqId = ++launchReq;
+      const t = setTimeout(() => { launchWaits.delete(reqId); reject(new Error('Nexus did not start the session (is a dialog open?)')); }, 30000);
+      launchWaits.set(reqId, (r) => { clearTimeout(t); launchWaits.delete(reqId); r.error ? reject(new Error(r.error)) : resolve(r); });
+      send('mcp:launch', { reqId, machineId: m.id, presetId: preset, cwd });
+    }),
+    send: async (id, text) => { const s = sessions.get(id); if (!s) throw new Error(`No session ${id}`); s.write(text); },
+    readOutput: async (id) => { const s = sessions.get(id); if (!s) throw new Error(`No session ${id}`); return s.recent || ''; },
+    close: async (id, kill) => { const s = sessions.get(id); if (!s) throw new Error(`No session ${id}`); send('mcp:close', { id, kill }); },
+  });
+  await srv.start();
+  mcp = srv;
+}
+function stopMcp() { if (mcp) { mcp.stop(); mcp = null; } }
+function syncMcp() { const on = !!(config.load().mcp || {}).enabled; if (on && !mcp) startMcp().catch(() => {}); else if (!on && mcp) stopMcp(); }
+ipcMain.on('mcp:launched', (_e, r) => { const fn = launchWaits.get(r && r.reqId); if (fn) fn(r); });
+ipcMain.handle('mcp:status', () => ({ running: !!mcp, port: mcp ? mcp.port : null, bridge: path.join(SCRIPTS_DIR, 'nexus-mcp.js') }));
+
 // ---- IPC: sessions ----
 ipcMain.handle('session:create', async (_e, spec) => {
   const cfg = config.load();
@@ -590,7 +637,7 @@ ipcMain.handle('session:create', async (_e, spec) => {
       if (cwd && m.type !== 'wsl' && !fs.existsSync(cwd)) cwd = undefined;
       const p = local.spawn({ cmd, cols, rows, script, cwd, wsl: m.type === 'wsl' ? m.distro : null });
       sessions.set(id, {
-        machineId: m.id,
+        machineId: m.id, presetId: preset.id, cwd: spec.cwd || null,
         write: (d) => p.write(d),
         resize: (c, r) => { try { p.resize(c, r); } catch {} },
         close: () => { try { p.kill(); } catch {} },
@@ -611,7 +658,7 @@ ipcMain.handle('session:create', async (_e, spec) => {
     const dec = new StringDecoder('utf8');
     let exitCode = null;
     sessions.set(id, {
-      machineId: m.id,
+      machineId: m.id, presetId: preset.id, cwd: spec.cwd || null,
       tmuxName,
       write: (d) => stream.write(d),
       resize: (c, r) => { try { stream.setWindow(r, c, 0, 0); } catch {} },

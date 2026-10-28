@@ -1127,6 +1127,20 @@
     api.answerHost(id, ok === true);
   });
 
+  // An MCP client (Claude Code on this PC) asked Nexus to start or close a session.
+  api.onMcpLaunch(async ({ reqId, machineId, presetId, cwd }) => {
+    try {
+      const s = await launch(machineId, presetId, { cwd: cwd || undefined });
+      if (!s) return api.mcpLaunched({ reqId, error: 'Launch was cancelled in Nexus' });
+      const until = now() + 20000;
+      while (s.status === 'starting' && now() < until) await new Promise((r) => setTimeout(r, 200));
+      if (!s.pid) return api.mcpLaunched({ reqId, error: 'The session did not start' });
+      toast(`An MCP client started ${presetById(presetId).name} on ${machineById(machineId).name}`, 'ok', 4000);
+      api.mcpLaunched({ reqId, id: s.pid, name: s.name, machineId, preset: presetId, cwd: s.cwd || null });
+    } catch (err) { api.mcpLaunched({ reqId, error: err.message }); }
+  });
+  api.onMcpClose(({ id, kill }) => { const s = S.byPid.get(id); if (s) closeSession(s.id, { kill: !!kill }); });
+
   api.onUpdateAvailable(({ version, url, download }) => {
     // Windows/Linux: the updater can fetch it (after you say so). macOS: open the release page.
     const run = download ? () => { api.downloadUpdate(); toast(`Downloading Nexus ${version}…`, 'ok', 4000); } : () => window.open(url);
@@ -1770,6 +1784,7 @@
         <label class="check field c6" style="flex-direction:row"><input type="checkbox" data-c="announce" ${(d.collab || {}).announce !== false ? 'checked' : ''}><span>Post in team chat when I start an agent on a shared machine</span></label>
         <label class="check field c6" style="flex-direction:row"><input type="checkbox" data-a="restoreSession" ${a.restoreSession !== false ? 'checked' : ''}><span>Restore sessions, layout and folders when Nexus starts</span></label>
         <label class="check field c6" style="flex-direction:row"><input type="checkbox" data-a="recordSessions" ${a.recordSessions ? 'checked' : ''}><span>Record remote sessions to <span class="mono">~/.nexus/logs</span> on the machine (audit trail; kept 30 days)</span></label>
+        <label class="check field c6" style="flex-direction:row"><input type="checkbox" data-mcp="enabled" ${(d.mcp || {}).enabled ? 'checked' : ''}><span>Let MCP clients on this PC control Nexus (list machines, launch agents, send text, read output). Register with Claude Code: <span class="mono" id="mcp-cmd">claude mcp add nexus -- node "${esc(S.mcpBridge || '…/scripts/nexus-mcp.js')}"</span></span></label>
         <label class="check field c6" style="flex-direction:row"><input type="checkbox" data-top="offline" ${d.offline ? 'checked' : ''}><span>Offline / air-gapped mode: no update checks, no internet installers (tools install from <span class="mono">~/.nexus/offline/</span> on each machine)</span></label>
       </div>`;
   }
@@ -1814,6 +1829,7 @@
       a[t.dataset.a] = t.type === 'checkbox' ? t.checked : t.type === 'number' ? Number(t.value) : t.value;
     }
     if (t.dataset.top) S.draft[t.dataset.top] = t.type === 'checkbox' ? t.checked : t.value.trim();
+    if (t.dataset.mcp) (S.draft.mcp = S.draft.mcp || {})[t.dataset.mcp] = t.checked;
   });
   $('#settings-body').addEventListener('click', async (e) => {
     const b = e.target.closest('[data-sact]');
@@ -2522,6 +2538,7 @@
       if ((m.type === 'ssh' && (m.host || m.tsHost)) || m.type === 'wsl') if ((S.mstate[m.id] || {}).status !== 'online') connectMachine(m.id);
     }
     api.appInfo().then((i) => { S.version = i.version; });
+    api.mcpStatus().then((i) => { S.mcpBridge = i.bridge; }).catch(() => {});
     TM.status = collabCfg().status || '';
     initTeam();
   }
