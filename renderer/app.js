@@ -1007,8 +1007,10 @@
     api.answerHost(id, ok === true);
   });
 
-  api.onUpdateAvailable(({ version, url }) => {
-    toast(`Nexus ${version} is available.`, 'ok', 60000, { label: 'Download', run: () => window.open(url) });
+  api.onUpdateAvailable(({ version, url, download }) => {
+    // Windows/Linux: the updater can fetch it (after you say so). macOS: open the release page.
+    const run = download ? () => { api.downloadUpdate(); toast(`Downloading Nexus ${version}…`, 'ok', 4000); } : () => window.open(url);
+    toast(`Nexus ${version} is available.`, 'ok', 60000, { label: download ? 'Download and install' : 'Download', run });
   });
   api.onUpdateReady((version) => {
     toast(`Nexus ${version} is ready to install.`, 'ok', 60000, { label: 'Restart now', run: () => api.installUpdate() });
@@ -1171,9 +1173,18 @@
 
   async function bootstrap(machineId) {
     const m = machineById(machineId);
+    const offline = !!S.cfg.offline;
+    const ok = await choose({
+      title: `Install tools on ${m.name}?`,
+      desc: offline
+        ? `Offline mode is on: the script only installs from ~/.nexus/offline/ on ${m.name} (tmux via the package manager, claude/agy/openclaw from installers you copied there) and never reaches the internet.`
+        : `This runs the vendors' install scripts on ${m.name} (curl … | bash from claude.ai, antigravity.google and openclaw.ai) and may ask for your sudo password. Only continue if ${m.name} is allowed to reach the internet and you trust those sources.`,
+      options: [{ label: 'Cancel', value: false, ghost: true }, { label: 'Install', value: true, primary: true }],
+    });
+    if (!ok) return;
     const r = await api.uploadBootstrap(machineId);
     if (!r.ok) { toast(`Can't reach ${m.name}: ${r.error}`, 'bad'); return; }
-    await launch(machineId, 'shell', { raw: true, cmd: 'bash ~/.nexus/bootstrap.sh', name: 'Install tools' });
+    await launch(machineId, 'shell', { raw: true, cmd: `${offline ? 'NEXUS_OFFLINE=1 ' : ''}bash ~/.nexus/bootstrap.sh`, name: 'Install tools' });
   }
 
   // ---------------------------------------------------------------- copy / paste / keys
@@ -1607,6 +1618,8 @@
         <div class="field c3"><label>Team chat lives on</label><select data-c="hub"><option value="">Auto (first SSH machine by hostname)</option>${d.machines.filter((m) => m.type === 'ssh').map((m) => { const h = (S.mstate[m.id] || {}).hostname; return h ? `<option value="${esc(h)}" ${(d.collab || {}).hub === h ? 'selected' : ''}>${esc(m.name)} (${esc(h)})</option>` : ''; }).join('')}</select></div>
         <label class="check field c6" style="flex-direction:row"><input type="checkbox" data-c="announce" ${(d.collab || {}).announce !== false ? 'checked' : ''}><span>Post in team chat when I start an agent on a shared machine</span></label>
         <label class="check field c6" style="flex-direction:row"><input type="checkbox" data-a="restoreSession" ${a.restoreSession !== false ? 'checked' : ''}><span>Restore sessions, layout and folders when Nexus starts</span></label>
+        <label class="check field c6" style="flex-direction:row"><input type="checkbox" data-a="recordSessions" ${a.recordSessions ? 'checked' : ''}><span>Record remote sessions to <span class="mono">~/.nexus/logs</span> on the machine (audit trail; kept 30 days)</span></label>
+        <label class="check field c6" style="flex-direction:row"><input type="checkbox" data-top="offline" ${d.offline ? 'checked' : ''}><span>Offline / air-gapped mode: no update checks, no internet installers (tools install from <span class="mono">~/.nexus/offline/</span> on each machine)</span></label>
       </div>`;
   }
 
@@ -1649,6 +1662,7 @@
       const a = S.draft.appearance;
       a[t.dataset.a] = t.type === 'checkbox' ? t.checked : t.type === 'number' ? Number(t.value) : t.value;
     }
+    if (t.dataset.top) S.draft[t.dataset.top] = t.type === 'checkbox' ? t.checked : t.value.trim();
   });
   $('#settings-body').addEventListener('click', async (e) => {
     const b = e.target.closest('[data-sact]');

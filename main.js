@@ -174,15 +174,24 @@ async function checkReleaseNotice() {
 }
 function setupUpdates() {
   if (!app.isPackaged) return;
-  if (platform.IS_MAC) { setTimeout(checkReleaseNotice, 8000); setInterval(checkReleaseNotice, 6 * 60 * 60 * 1000); return; }
+  if (platform.IS_MAC) {
+    const notice = () => { if (!config.load().offline) checkReleaseNotice(); };
+    setTimeout(notice, 8000); setInterval(notice, 6 * 60 * 60 * 1000);
+    return;
+  }
   let autoUpdater;
   try { ({ autoUpdater } = require('electron-updater')); } catch { return; }
-  autoUpdater.autoDownload = true;
+  // Builds are unsigned, so a release is trusted only because it came from the project's GitHub. Don't fetch and
+  // stage code silently: announce the version and let the user choose to download it, so an unexpected release is
+  // visible before it is installed. Offline mode (Settings) skips the check entirely.
+  autoUpdater.autoDownload = false;
+  autoUpdater.on('update-available', (info) => send('update:available', { version: info.version, url: `https://github.com/mirrorsedgepro-stack/Intergrate-Your-AI/releases/tag/v${info.version}`, download: true }));
   autoUpdater.on('update-downloaded', (info) => send('update:ready', info.version));
   autoUpdater.on('error', () => {});
-  const check = () => autoUpdater.checkForUpdates().catch(() => {});
+  const check = () => { if (!config.load().offline) autoUpdater.checkForUpdates().catch(() => {}); };
   setTimeout(check, 8000);
   setInterval(check, 6 * 60 * 60 * 1000);
+  ipcMain.on('update:download', () => autoUpdater.downloadUpdate().catch(() => {}));
   ipcMain.on('update:install', () => autoUpdater.quitAndInstall());
 }
 
@@ -230,8 +239,19 @@ app.on('window-all-closed', () => {
 });
 
 // ---- IPC: config / app ----
-// The renderer never sees the (encrypted) Tailscale token.
-const publicConfig = () => { const c = { ...config.load() }; if (c.tailscale) c.tailscale = { ...c.tailscale, token: undefined }; return c; };
+// The renderer never sees the (encrypted) Tailscale token, nor any key passphrase someone put in config.json by hand.
+const publicConfig = () => {
+  const c = { ...config.load() };
+  if (c.tailscale) c.tailscale = { ...c.tailscale, token: undefined };
+  c.machines = (c.machines || []).map((m) => (m.passphrase ? { ...m, passphrase: undefined } : m));
+  return c;
+};
+// Passphrases are per-run secrets (asked in a modal, held in memory). One left in config.json is still honoured for
+// compatibility, but is kept out of the renderer and out of any config the renderer writes back.
+const withSecrets = (machines, prev) => (machines || []).map((m) => {
+  const p = (prev || []).find((x) => x.id === m.id);
+  return p && p.passphrase ? { ...m, passphrase: p.passphrase } : { ...m, passphrase: undefined };
+});
 ipcMain.handle('config:get', () => publicConfig());
 // A fresh renderer (first load or reload) owns no sessions: drop any left over. Remote tmux sessions survive.
 ipcMain.on('app:hello', () => {
@@ -240,7 +260,7 @@ ipcMain.on('app:hello', () => {
 });
 ipcMain.handle('config:save', (_e, cfg) => {
   const prev = config.load();
-  config.save({ ...cfg, knownHosts: prev.knownHosts, window: prev.window, tailscale: prev.tailscale });
+  config.save({ ...cfg, machines: withSecrets(cfg.machines, prev.machines), knownHosts: prev.knownHosts, window: prev.window, tailscale: prev.tailscale });
   // Drop connections whose address changed so the next use reconnects with new settings.
   for (const [id, m] of machines) {
     const a = prev.machines.find((x) => x.id === id), b = cfg.machines.find((x) => x.id === id);
@@ -431,7 +451,11 @@ ipcMain.handle('ts:revoke', safe(async (_e, { userId, inviteId }) => {
   return {};
 }));
 ipcMain.handle('ts:encode-invite', (_e, data) => tailscale.encodeInvite(data));
-ipcMain.handle('ts:decode-invite', safe(async (_e, code) => tailscale.decodeInvite(code)));
+ipcMain.handle('ts:decode-invite', safe(async (_e, code) => {
+  let local = null;
+  try { local = (await tailscale.localStatus()).tailnet || null; } catch { /* no local client: skip the check */ }
+  return tailscale.decodeInvite(code, local);
+}));
 
 // ---- IPC: team chat + presence (stored on the hub machine, over the existing SSH connection) ----
 let hub = null; // { machineId, ch: CollabHub }
@@ -506,7 +530,7 @@ ipcMain.handle('session:create', async (_e, spec) => {
 
     const mach = getMachine(m.id);
     const tmuxName = spec.raw ? null : (spec.attach || `nx-${preset.id}-${Date.now().toString(36).slice(-4)}${Math.random().toString(36).slice(2, 4)}`);
-    const stream = await mach.open({ tmuxName, cmd, cols, rows, cwd: spec.cwd, readOnly: !!spec.readOnly });
+    const stream = await mach.open({ tmuxName, cmd, cols, rows, cwd: spec.cwd, readOnly: !!spec.readOnly, record: !!(cfg.appearance || {}).recordSessions });
     const dec = new StringDecoder('utf8');
     let exitCode = null;
     sessions.set(id, {

@@ -6,6 +6,7 @@ param(
   [int]$Port = 22
 )
 
+if ($HostName.StartsWith('-') -or $User.StartsWith('-')) { Write-Host "  ✗ Host and user must not start with '-'" -ForegroundColor Red; return }
 $target = if ($User) { "$User@$HostName" } else { $HostName }
 Write-Host ''
 Write-Host "  Nexus  ·  SSH key setup for $target" -ForegroundColor Magenta
@@ -29,14 +30,14 @@ Write-Host ''
 Write-Host "  • Copying the public key to $target - enter the remote password when asked." -ForegroundColor Cyan
 Write-Host ''
 $remote = "umask 077; mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && (grep -qxF '$pub' ~/.ssh/authorized_keys || echo '$pub' >> ~/.ssh/authorized_keys)"
-ssh -p $Port -o StrictHostKeyChecking=accept-new $target $remote
+ssh -p $Port -o StrictHostKeyChecking=accept-new -- $target $remote
 if ($LASTEXITCODE -ne 0) { Write-Host ''; Write-Host '  ✗ Could not install the key (wrong password, or sshd not running on the remote?)' -ForegroundColor Red; return }
 
 Write-Host ''
 Write-Host '  • Testing passwordless login…' -ForegroundColor Cyan
 # Offer this key explicitly: an IdentityFile for this host in ~/.ssh/config (e.g. NVIDIA Sync) would
 # otherwise stop ssh from trying the default key at all.
-$out = ssh -p $Port -i $key -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=6 $target 'echo nexus-ok'
+$out = ssh -p $Port -i $key -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=6 -- $target 'echo nexus-ok'
 if ($out -match 'nexus-ok') {
   Write-Host ''
   Write-Host '  ✓ All set. Close this tab (Ctrl+Shift+W) and click Connect on the machine in Nexus.' -ForegroundColor Green

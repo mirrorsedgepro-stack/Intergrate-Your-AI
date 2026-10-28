@@ -1,5 +1,10 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
+// Paths that came out of a real drag-and-drop (webUtils.getPathForFile) in this renderer. upload-files only accepts
+// these, so a compromised page can't name an arbitrary local file (~/.ssh/id_ed25519) to ship to a remote machine.
+const dropped = new Set();
+const pathForFile = (file) => { const p = webUtils.getPathForFile(file); if (p) dropped.add(p); return p; };
+
 const on = (ch) => (fn) => {
   const h = (_e, ...a) => fn(...a);
   ipcRenderer.on(ch, h);
@@ -20,7 +25,8 @@ contextBridge.exposeInMainWorld('nexus', {
   flash: () => ipcRenderer.send('app:flash'),
   readClipboard: () => ipcRenderer.invoke('clipboard:read'),
   writeClipboard: (t) => ipcRenderer.send('clipboard:write', t),
-  pathForFile: (file) => webUtils.getPathForFile(file),
+  pathForFile,
+  downloadUpdate: () => ipcRenderer.send('update:download'),
   installUpdate: () => ipcRenderer.send('update:install'),
   answerPassphrase: (id, value) => ipcRenderer.send('auth:answer', id, value),
   answerHost: (id, ok) => ipcRenderer.send('auth:host-answer', id, ok === true),
@@ -42,7 +48,7 @@ contextBridge.exposeInMainWorld('nexus', {
   close: (id, opts) => ipcRenderer.invoke('session:close', id, opts),
   cwd: (id) => ipcRenderer.invoke('session:cwd', id),
   pasteImage: (id) => ipcRenderer.invoke('session:paste-image', id),
-  uploadFiles: (id, paths) => ipcRenderer.invoke('session:upload-files', id, paths),
+  uploadFiles: (id, paths) => ipcRenderer.invoke('session:upload-files', id, (paths || []).filter((p) => dropped.has(p))),
 
   tsStatus: () => ipcRenderer.invoke('ts:status'),
   tsSetToken: (t) => ipcRenderer.invoke('ts:set-token', t),
