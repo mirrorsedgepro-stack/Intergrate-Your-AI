@@ -1869,6 +1869,8 @@
   const sparkArgs = () => sshMachines().filter((m) => !m.invited)
     .map((m) => ({ machineId: m.id, hostname: (S.mstate[m.id] || {}).hostname || '', tsHost: m.tsHost || '' })).filter((x) => x.hostname || x.tsHost);
   const sshUsersFor = () => [...new Set(sshMachines().map((m) => m.user).filter(Boolean))];
+  // Per-guest Linux accounts (default for new setups); an existing setup keeps shared accounts until the owner switches.
+  const perGuest = () => { const t = S.cfg.tailscale || {}; return t.perGuestUsers != null ? !!t.perGuestUsers : !(SH.overview && SH.overview.guests && SH.overview.guests.length); };
 
   async function refreshShare({ overview = true } = {}) {
     SH.ts = await api.tsStatus();
@@ -1960,8 +1962,12 @@
           + `<div class="sh-inline"><button class="btn sm primary" data-sh="apply" ${SH.plan.changes.length ? '' : 'disabled'}>Apply changes</button><button class="btn sm ghost" data-sh="cancelplan">Cancel</button></div>`;
       } else {
         const tagged = SH.overview && SH.overview.sparks.length && SH.overview.sparks.every((s) => s.device && s.device.tags.includes(SH.overview.tag));
-        rules = `<p>Guests get SSH to these machines only, as ${sshUsersFor().map((u) => `<span class="mono">${esc(u)}</span>`).join(' / ')}, through Tailscale SSH: no keys to hand out, and removing a guest cuts access straight away. Your own access stays unchanged.</p>`
-          + `<p class="warn small"><b>Guests log in as these same accounts.</b> They can read everything those accounts can: files, SSH keys, Claude / Antigravity / OpenClaw sign-ins, and your tmux sessions (read-only watching is a courtesy, not a lock). They could also leave something behind that keeps running after you remove them. Invite only people you'd trust with that account. Safer: share machines whose User is a dedicated, unprivileged account (no sudo, no personal sign-ins or keys).</p>`
+        rules = `<label class="check" style="flex-direction:row;margin:4px 0 8px"><input type="checkbox" data-sh="mode" ${perGuest() ? 'checked' : ''}><span>Give each guest their own Linux account (<span class="mono">nexus-&lt;name&gt;</span>), created on the shared machines when you invite them (recommended)</span></label>`
+          + (perGuest()
+            ? `<p>Guests get SSH to these machines only, each as their own account, through Tailscale SSH: no keys to hand out, and removing a guest removes their login at once. Their files stay in <span class="mono">/home/nexus-&lt;name&gt;</span>. Your own access (as ${sshUsersFor().map((u) => `<span class="mono">${esc(u)}</span>`).join(' / ')}) is unchanged.</p>`
+              + `<p class="warn small">Creating accounts needs sudo on each machine (Nexus opens a tab and asks). Guests still share the GPU, RAM and anything world-readable; agents they run sign in with their own credentials.</p>`
+            : `<p>Guests get SSH to these machines only, as ${sshUsersFor().map((u) => `<span class="mono">${esc(u)}</span>`).join(' / ')}, through Tailscale SSH: no keys to hand out, and removing a guest cuts access straight away. Your own access stays unchanged.</p>`
+              + `<p class="warn small"><b>Guests log in as these same accounts.</b> They can read everything those accounts can: files, SSH keys, Claude / Antigravity / OpenClaw sign-ins, and your tmux sessions (read-only watching is a courtesy, not a lock). They could also leave something behind that keeps running after you remove them. Invite only people you'd trust with that account. Safer: tick the box above.</p>`)
           + `<div class="sh-inline"><button class="btn sm ${tagged ? '' : 'primary'}" data-sh="plan">${tagged ? 'Re-check access rules' : 'Review access rules…'}</button>${tagged ? '<span class="chip" style="--mc:#73daca">Machines tagged and locked down</span>' : ''}</div>`;
       }
     }
@@ -1997,7 +2003,7 @@
 
   // Preview + apply a policy change. Returns true when applied (or nothing to do).
   async function applyPlan(args, { confirmText } = {}) {
-    const plan = await api.tsPlan({ machines: sparkArgs(), sshUsers: sshUsersFor(), ...args });
+    const plan = await api.tsPlan({ machines: sparkArgs(), sshUsers: sshUsersFor(), perGuestUsers: perGuest(), ...args });
     if (!plan.ok) throw new Error(plan.error);
     if (!plan.changes.length) return true;
     if (confirmText && !confirm(`${confirmText}\n\n• ${plan.changes.join('\n• ')}`)) return false;
@@ -2006,11 +2012,33 @@
     return true;
   }
 
+  // Per-guest accounts: run the account step on every shared machine in a visible tab (it needs sudo, so the owner
+  // types their password there). The script is idempotent; userdel is never run: a removed guest's account is locked
+  // and their processes killed, their home folder stays for the owner to inspect or delete.
+  const USERADD = (u, email) => `u=${u}; if id -u "$u" >/dev/null 2>&1; then echo "account $u exists"; else sudo useradd -m -s /bin/bash -c ${JSON.stringify(`Nexus guest ${email}`)} "$u" && echo "created $u"; fi; `
+    + `sudo usermod -U "$u" 2>/dev/null; for g in video render docker; do getent group "$g" >/dev/null && sudo usermod -aG "$g" "$u"; done; `
+    + `sudo chmod 750 "/home/$u" 2>/dev/null; sudo -u "$u" -H bash -lc 'mkdir -p ~/.nexus && chmod 700 ~/.nexus && command -v claude >/dev/null || echo "note: claude is not on PATH for this account; it needs its own install or a shared one in /usr/local/bin"'; echo done`;
+  const USERLOCK = (u) => `u=${u}; if id -u "$u" >/dev/null 2>&1; then sudo usermod -L "$u" && sudo pkill -u "$u"; echo "locked $u (home folder kept)"; else echo "no account $u"; fi`;
+  function createGuestAccounts(sparks, user, email) {
+    for (const m of sparks) launch(m.id, 'shell', { raw: true, cmd: USERADD(user, email), name: `Account ${user} → ${m.name}` });
+    toast(`Creating ${user} on ${sparks.map((m) => m.name).join(', ')} (sudo password in the new tab${sparks.length > 1 ? 's' : ''})`, 'ok', 6000);
+  }
+  function lockGuestAccounts(sparks, user) {
+    for (const m of sparks) launch(m.id, 'shell', { raw: true, cmd: USERLOCK(user), name: `Lock ${user} → ${m.name}` });
+  }
+
   async function onShareClick(e) {
     const b = e.target.closest('[data-sh]');
     if (!b) return;
     const act = b.dataset.sh;
     if (act === 'close') return closeShare();
+    if (act === 'mode') {
+      await api.tsSetMode({ perGuestUsers: b.checked });
+      S.cfg.tailscale = { ...(S.cfg.tailscale || {}), perGuestUsers: b.checked };
+      SH.plan = null;
+      renderShare();
+      return;
+    }
     if (act === 'refresh') return busy('refresh', () => refreshShare());
     if (act === 'install') {
       if (IS_MAC) return window.open('https://tailscale.com/download/mac');
@@ -2033,7 +2061,7 @@
     });
     if (act === 'cleartoken') { await api.tsClearToken(); SH.overview = null; return refreshShare(); }
     if (act === 'plan') return busy('plan', async () => {
-      const p = await api.tsPlan({ machines: sparkArgs(), sshUsers: sshUsersFor() });
+      const p = await api.tsPlan({ machines: sparkArgs(), sshUsers: sshUsersFor(), perGuestUsers: perGuest() });
       if (!p.ok) throw new Error(p.error);
       SH.plan = p;
       renderShare();
@@ -2054,11 +2082,13 @@
       if (!(await applyPlan({ addGuest: email }, { confirmText: `Give ${email} SSH access to your shared machines? This updates your tailnet:` }))) return;
       const inv = await api.tsInvite(email);
       if (!inv.ok) throw new Error(inv.error);
+      const guestUser = perGuest() ? await api.tsGuestUser(email) : null;
+      if (guestUser) createGuestAccounts(sparks, guestUser, email);
       const code = await api.tsEncodeInvite({
         tailnet: SH.ts.local.tailnet,
-        machines: sparks.map((m) => ({ name: m.name, host: m.tsHost, user: m.user, icon: machineIconKey(m) === 'nvidia' ? 'nvidia' : '' })),
+        machines: sparks.map((m) => ({ name: m.name, host: m.tsHost, user: guestUser || m.user, icon: machineIconKey(m) === 'nvidia' ? 'nvidia' : '' })),
       });
-      const users = sparks.map((m) => `${m.name}: ${m.user}`).join(', ');
+      const users = sparks.map((m) => `${m.name}: ${guestUser || m.user}`).join(', ');
       SH.result = {
         email, code,
         message: `You're invited to use my machines through Nexus.\n\n`
@@ -2078,6 +2108,7 @@
       if (!(await applyPlan({ removeGuest: email }))) return;
       const r = await api.tsRevoke({ userId: g.userId, inviteId: g.inviteId });
       if (!r.ok) throw new Error(r.error);
+      if (perGuest()) lockGuestAccounts(sshMachines().filter((m) => m.tsHost && !m.invited), await api.tsGuestUser(email), email);
       toast(`${email} removed`, 'ok');
       await refreshShare();
     });

@@ -418,13 +418,13 @@ ipcMain.handle('ts:overview', safe(async (_e, machines) => {
 }));
 
 // Preview the policy + tag changes needed to share the machines (no changes made).
-ipcMain.handle('ts:plan', safe(async (_e, { machines, sshUsers, addGuest, removeGuest }) => {
+ipcMain.handle('ts:plan', safe(async (_e, { machines, sshUsers, addGuest, removeGuest, perGuestUsers }) => {
   const api = tsApi();
   const [{ policy, etag }, devices] = await Promise.all([api.getPolicy(), api.devices()]);
   let guests = tailscale.guestsIn(policy);
   if (addGuest) guests = [...guests, addGuest.toLowerCase()];
   if (removeGuest) guests = guests.filter((g) => g !== removeGuest.toLowerCase());
-  const plan = tailscale.planPolicy(policy, { guests, sshUsers });
+  const plan = tailscale.planPolicy(policy, { guests, sshUsers, perGuestUsers: !!perGuestUsers });
   const sparks = matchDevices(devices, machines, await selfName());
   const tagChanges = sparks.filter((s) => s.device && !s.device.tags.includes(tailscale.SPARK_TAG))
     .map((s) => ({ deviceId: s.device.id, hostname: s.hostname, device: s.device.name, tags: [...s.device.tags, tailscale.SPARK_TAG] }));
@@ -459,6 +459,14 @@ ipcMain.handle('ts:revoke', safe(async (_e, { userId, inviteId }) => {
   return {};
 }));
 ipcMain.handle('ts:encode-invite', (_e, data) => tailscale.encodeInvite(data));
+ipcMain.handle('ts:guest-user', (_e, email) => tailscale.guestUser(email));
+// Remember the sharing mode (per-guest accounts or shared accounts) next to the token.
+ipcMain.handle('ts:set-mode', (_e, { perGuestUsers }) => {
+  const c = config.load();
+  c.tailscale = { ...(c.tailscale || {}), perGuestUsers: !!perGuestUsers };
+  config.save(c);
+  return true;
+});
 ipcMain.handle('ts:decode-invite', safe(async (_e, code) => {
   let local = null;
   try { local = (await tailscale.localStatus()).tailnet || null; } catch { /* no local client: skip the check */ }

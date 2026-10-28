@@ -59,6 +59,8 @@ contextBridge.exposeInMainWorld('nexus', {
   tsApply: (plan) => ipcRenderer.invoke('ts:apply', plan),
   tsInvite: (email) => ipcRenderer.invoke('ts:invite', email),
   tsRevoke: (args) => ipcRenderer.invoke('ts:revoke', args),
+  tsGuestUser: (email) => ipcRenderer.invoke('ts:guest-user', email),
+  tsSetMode: (args) => ipcRenderer.invoke('ts:set-mode', args),
   tsEncodeInvite: (data) => ipcRenderer.invoke('ts:encode-invite', data),
   tsDecodeInvite: (code) => ipcRenderer.invoke('ts:decode-invite', code),
 

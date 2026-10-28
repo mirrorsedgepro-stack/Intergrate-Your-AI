@@ -96,3 +96,25 @@ test('matchDevices: tailnet name first, ambiguous hostnames and this PC are neve
   assert.strictEqual(dup.ambiguous, true);
   assert.strictEqual(spoof.device, null, 'never tag this PC');
 });
+
+test('planPolicy per-guest mode: admins keep the shared rule, each guest gets their own account, removed guests lose theirs', () => {
+  const { guestUser } = require('../lib/tailscale');
+  assert.strictEqual(guestUser('Alice.Smith+gpu@example.com'), 'nexus-alice-smith-gpu');
+  const first = planPolicy(DEFAULT, { guests: ['alice@x.com', 'bob@x.com'], sshUsers: ['jcee'], perGuestUsers: true });
+  const shared = first.policy.ssh.find((r) => r.dst[0] === SPARK_TAG && r.src.length === 1 && r.src[0] === 'autogroup:admin');
+  assert.deepStrictEqual(shared.users, ['jcee']);
+  assert.ok(!first.policy.ssh.some((r) => r.src.includes(GUEST_GROUP)), 'guests do not get the shared account');
+  const alice = first.policy.ssh.find((r) => r.src[0] === 'alice@x.com');
+  assert.deepStrictEqual(alice.users, ['nexus-alice']);
+  // idempotent
+  assert.deepStrictEqual(planPolicy(first.policy, { guests: ['alice@x.com', 'bob@x.com'], sshUsers: ['jcee'], perGuestUsers: true }).changes, []);
+  // removing bob drops his rule
+  const less = planPolicy(first.policy, { guests: ['alice@x.com'], sshUsers: ['jcee'], perGuestUsers: true });
+  assert.ok(!less.policy.ssh.some((r) => r.src[0] === 'bob@x.com'));
+  assert.ok(less.changes.some((c) => /remove bob@x.com/.test(c)));
+  // switching an existing shared-mode policy to per-guest narrows the legacy rule
+  const sharedMode = planPolicy(DEFAULT, { guests: ['alice@x.com'], sshUsers: ['jcee'] }).policy;
+  const moved = planPolicy(sharedMode, { guests: ['alice@x.com'], sshUsers: ['jcee'], perGuestUsers: true });
+  assert.ok(!moved.policy.ssh.some((r) => r.src.includes(GUEST_GROUP) && r.dst[0] === SPARK_TAG));
+  assert.ok(moved.changes.some((c) => /no longer share/.test(c)));
+});
