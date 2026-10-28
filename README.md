@@ -51,7 +51,15 @@ The machine needs `sshd` running (`sudo apt install openssh-server`).
 | **Project folders** | Shift+click or right-click a launcher (or Ctrl+Shift+N) to pick a folder: recent folders, git projects and top-level folders on that machine, or type any path. |
 | **Images & files** | Ctrl+V with a screenshot on the clipboard saves it as a PNG on the session's machine and pastes the path. Drop files onto a pane to do the same. Remote copies go to `~/.nexus/uploads` and are deleted after 7 days. |
 | **Agent alerts** | Bells and OSC 9/777 notifications mark a session as waiting and raise a Windows notification. With "Enable Claude alerts" Claude rings exactly when it stops or needs you; other agents fall back to output-activity detection. |
-| **GPU stats** | Each machine card shows GPU load, temperature and power (`nvidia-smi`), RAM and CPU load, refreshed every 5 s. |
+| **Machine stats** | Each machine card (this PC, WSL distros and SSH machines) shows GPU load, temperature and power (`nvidia-smi`), RAM, CPU load, free disk on the home filesystem and network throughput in/out, refreshed every 5 s. |
+| **Port forwarding** | Machine ⋯ menu → **Forward a port…**: a remote web UI (OpenClaw gateway, Jupyter, TensorBoard) becomes `http://localhost:<port>` over the SSH connection, loopback only. |
+| **Jump hosts** | `ProxyJump` and `Match host` in `~/.ssh/config` are honoured; a machine can also set its own **Jump host** in Settings (like `ssh -J`). |
+| **Session recording** | Settings → *Record remote sessions*: everything an agent prints goes to `~/.nexus/logs/<session>-<date>.log` on the machine (`tmux pipe-pane`), kept 30 days. |
+| **Why Claude stopped** | With *Enable Claude alerts*, the hook records whether Claude is waiting for a permission (and for what) or finished (and its last reply); shown in the pane header and the notification. |
+| **Claims & queue** | Team chat `/claim gpu-box 2h fine-tuning` marks a machine as yours on everyone's cards (`/release gpu-box` when done). Launching an agent on a claimed machine offers **Start when free**: it starts once the claim is gone and the GPU is idle. |
+| **Export / import** | Ctrl+Shift+O → export workspaces and presets to a JSON file, or import a teammate's (sessions are re-pointed at your machines by address or name). **Publish my presets to the team** puts them on the chat hub for others to import. |
+| **Offline mode** | Settings: no update checks, no internet installers. *Install tools* then uses installers you place in `~/.nexus/offline/` on each machine (`claude-install.sh`, `agy-install.sh`, `openclaw-install.sh`). |
+| **MCP server** | Settings → *Let MCP clients on this PC control Nexus*, then `claude mcp add nexus -- node <Nexus>/scripts/nexus-mcp.js`: Claude Code can list machines and sessions, launch agents, send text and read their output. Loopback only, token in `~/.nexus/mcp.json`. |
 | **Auto-reconnect** | If a machine drops off the network, sessions show "reconnecting…" and reattach on their own (backoff up to 30 s). Nothing is lost: tmux kept them running. |
 | **Resizable splits** | Drag the divider between panes; double-click it to reset. |
 | **Send last reply** | Ctrl+Shift+S (or the ➤ button on an agent pane) puts the agent's latest answer into the broadcast composer, aimed at your other agents, ready to edit and send. |
@@ -61,7 +69,9 @@ The machine needs `sshd` running (`sudo apt install openssh-server`).
 
 Click the **Share** (people) icon in the title bar. Guests join your tailnet, but an access policy limits them to
 SSH on your SSH machines, through **Tailscale SSH**: no keys to hand out, and removing a guest cuts their access at once.
-They log in as each machine's configured user (the **User** field in Settings), so they share those accounts with you.
+By default each guest gets **their own Linux account** (`nexus-<name>`) on the shared machines, created when you invite
+them (Nexus opens a tab per machine and asks for your sudo password) and locked when you remove them. Untick the box in
+the Share panel to use the older shared-account mode, where guests log in as each machine's configured **User**.
 
 **Owner, once:**
 1. **This PC on Tailscale**: Install Tailscale (opens `winget install Tailscale.Tailscale`), then sign in from the tray icon.
@@ -83,10 +93,11 @@ login users; no keys or tokens.
 > Tip: Tailscale SSH and Nexus's own SSH key setup don't need password logins. If you enabled `PasswordAuthentication`
 > on a machine to get started, consider turning it off again once your key works.
 
-> **Security:** guests log in as the machine's configured user, so they can read anything that account can (files,
-> SSH keys, agent sign-ins, tmux sessions) and could leave a process running after removal. Share machines whose User
-> is a dedicated, unprivileged account. Invite codes only accept tailnet addresses, Nexus asks before adding them, and
-> it never offers your SSH keys to invited machines.
+> **Security:** in shared-account mode guests can read anything that account can (files, SSH keys, agent sign-ins,
+> tmux sessions) and could leave a process running after removal; per-guest accounts avoid that, though guests still
+> share the GPU and RAM. Invite codes only accept tailnet addresses on *your* tailnet, Nexus asks before adding them,
+> and it never offers your SSH keys to invited machines. Updates are never downloaded silently: Nexus announces a new
+> version and installs only when you ask.
 
 ## Team chat and deconfliction
 
@@ -124,7 +135,7 @@ To use password-protected keys without a prompt each run, start the Windows Open
 | Ctrl+Shift+L · Ctrl+Shift+D | Cycle layout (1 / 2 / 4 panes) · open current side by side |
 | Ctrl+Alt+Arrows | Move focus between panes |
 | Ctrl+Shift+Enter · Ctrl+Shift+S | Broadcast a prompt · send the focused agent's last reply |
-| Ctrl+Shift+M | Team chat |
+| Ctrl+Shift+M | Team chat (`/status …`, `/claim <machine> <2h|15:00> [note]`, `/release <machine>`) |
 | Ctrl+C / Ctrl+V | Copy if text is selected (otherwise interrupt) / paste text or a screenshot |
 | Shift+drag | Select text even when the app uses the mouse (Claude Code's full-screen UI). Selecting inside Claude itself also copies to the Windows clipboard. |
 | Shift+Enter | Newline in Claude/Antigravity without submitting |
