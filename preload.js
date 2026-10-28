@@ -61,6 +61,10 @@ contextBridge.exposeInMainWorld('nexus', {
   tsEncodeInvite: (data) => ipcRenderer.invoke('ts:encode-invite', data),
   tsDecodeInvite: (code) => ipcRenderer.invoke('ts:decode-invite', code),
 
+  tunnelOpen: (args) => ipcRenderer.invoke('tunnel:open', args),
+  tunnelClose: (id) => ipcRenderer.invoke('tunnel:close', id),
+  tunnelList: () => ipcRenderer.invoke('tunnel:list'),
+
   collabStart: (machineId) => ipcRenderer.invoke('collab:start', machineId),
   collabStop: () => ipcRenderer.invoke('collab:stop'),
   collabPost: (msg) => ipcRenderer.invoke('collab:post', msg),

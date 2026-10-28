@@ -9,6 +9,7 @@ const platform = require('./lib/platform');
 const { Machine } = require('./lib/remote');
 const tailscale = require('./lib/tailscale');
 const collab = require('./lib/collab');
+const { Tunnel } = require('./lib/tunnel');
 
 if (!app.requestSingleInstanceLock()) app.quit();
 app.setAppUserModelId('com.nexus.terminal');
@@ -234,6 +235,7 @@ app.whenReady().then(async () => {
 app.on('second-instance', () => { if (win) { if (win.isMinimized()) win.restore(); win.focus(); } });
 app.on('window-all-closed', () => {
   for (const s of sessions.values()) { try { s.close(); } catch {} }
+  for (const x of tunnels.values()) x.t.stop();
   for (const m of machines.values()) m.disconnect();
   app.quit();
 });
@@ -264,7 +266,7 @@ ipcMain.handle('config:save', (_e, cfg) => {
   // Drop connections whose address changed so the next use reconnects with new settings.
   for (const [id, m] of machines) {
     const a = prev.machines.find((x) => x.id === id), b = cfg.machines.find((x) => x.id === id);
-    if (!b || !a || a.host !== b.host || a.user !== b.user || String(a.port) !== String(b.port) || a.keyPath !== b.keyPath) {
+    if (!b || !a || a.host !== b.host || a.user !== b.user || String(a.port) !== String(b.port) || a.keyPath !== b.keyPath || (a.jump || '') !== (b.jump || '')) {
       m.disconnect();
       machines.delete(id);
       send('machine:status', id, 'offline', null);
@@ -462,6 +464,26 @@ ipcMain.handle('ts:decode-invite', safe(async (_e, code) => {
   try { local = (await tailscale.localStatus()).tailnet || null; } catch { /* no local client: skip the check */ }
   return tailscale.decodeInvite(code, local);
 }));
+
+// ---- IPC: port forwarding (ssh -L over the machine's connection) ----
+const tunnels = new Map(); // id -> { machineId, t: Tunnel }
+let nextTunnel = 1;
+const tunnelList = () => [...tunnels].map(([id, x]) => ({ id, machineId: x.machineId, ...x.t.info() }));
+ipcMain.handle('tunnel:open', safe(async (_e, { machineId, remoteHost, remotePort, localPort }) => {
+  const m = machineCfg(machineId);
+  if (!m || m.type !== 'ssh') throw new Error('Port forwarding needs an SSH machine');
+  const host = String(remoteHost || '127.0.0.1').trim();
+  if (!/^[\w.-]+$/.test(host)) throw new Error('Remote host must be a hostname or IP');
+  const mach = getMachine(machineId);
+  await mach.connect();
+  const t = new Tunnel(mach, { remoteHost: host, remotePort, localPort });
+  await t.start();
+  const id = `t${nextTunnel++}`;
+  tunnels.set(id, { machineId, t }); // kept across reconnects: new connections use whatever conn the machine has
+  return { id, ...t.info() };
+}));
+ipcMain.handle('tunnel:close', (_e, id) => { const x = tunnels.get(id); if (x) { x.t.stop(); tunnels.delete(id); } return true; });
+ipcMain.handle('tunnel:list', () => tunnelList());
 
 // ---- IPC: team chat + presence (stored on the hub machine, over the existing SSH connection) ----
 let hub = null; // { machineId, ch: CollabHub }

@@ -59,6 +59,7 @@
   const S = {
     cfg: null,
     mstate: {},           // machineId -> { status, error, tools, detached, hostname }
+    tunnels: [],          // active port forwards: { id, machineId, localPort, remoteHost, remotePort }
     sessions: new Map(),  // local id -> session
     byPid: new Map(),     // main-process id -> session
     early: new Map(),     // data that arrived before we mapped the pid
@@ -791,7 +792,7 @@
     return `<div class="machine" style="--c:${m.color}" data-machine="${m.id}">
       <div class="m-head">
         <div class="m-icon">${mIcon(m)}</div>
-        <div class="m-meta"><div class="m-name">${esc(m.name)} <span class="dot ${status}" title="${status}"></span></div><div class="m-sub">${st.status === 'online' && st.route === 'tailscale' ? '<span class="route ts" title="Connected through Tailscale">TS</span>' : ''}${esc(sub)}</div></div>
+        <div class="m-meta"><div class="m-name">${esc(m.name)} <span class="dot ${status}" title="${status}"></span></div><div class="m-sub">${st.status === 'online' && st.route === 'tailscale' ? '<span class="route ts" title="Connected through Tailscale">TS</span>' : st.status === 'online' && st.route === 'jump' ? '<span class="route ts" title="Connected through a jump host">JUMP</span>' : ''}${esc(sub)}</div></div>
         <div class="m-actions">
           ${m.type === 'ssh' ? `<button class="icon-btn" data-act="refresh" data-m="${m.id}" title="${status === 'online' ? 'Refresh' : 'Connect'}">${status === 'online' ? I.refresh : I.plug}</button>` : ''}
           <button class="icon-btn" data-act="mmenu" data-m="${m.id}" title="More">${I.more}</button>
@@ -1168,10 +1169,35 @@
       items.push({ label: 'Enable Claude alerts', icon: I.bell, run: () => enableAlerts(m.id) });
       items.push({ label: 'Join Tailscale (sudo tailscale up --ssh)…', icon: I.plug, run: () => launch(m.id, 'shell', { raw: true, cmd: 'sudo tailscale up --ssh && tailscale status | head -5', name: `Tailscale → ${m.name}` }) });
       items.push({ label: 'Share over Tailscale…', icon: I.send, run: openShare });
+      items.push('sep', { header: 'Port forwarding' });
+      for (const t of S.tunnels.filter((t) => t.machineId === m.id)) {
+        items.push({ label: `Open localhost:${t.localPort} → ${t.remoteHost === '127.0.0.1' ? '' : t.remoteHost + ':'}${t.remotePort}`, icon: I.plug, run: () => window.open(`http://localhost:${t.localPort}/`) });
+        items.push({ label: `Stop forwarding localhost:${t.localPort}`, icon: I.x, run: () => closeTunnel(t.id) });
+      }
+      items.push({ label: 'Forward a port…', icon: I.plug, run: () => forwardPort(m.id) });
     }
     items.push('sep', { label: 'Machine settings…', icon: I.gear, run: openSettings });
     showMenu(x, y, items);
   }
+
+  // ---- port forwarding (ssh -L over the machine's connection): a remote web UI as http://localhost:<port> ----
+  async function forwardPort(machineId) {
+    const m = machineById(machineId);
+    const spec = await promptText({
+      title: `Forward a port from ${m.name}`, label: 'Remote port (or host:port as seen from that machine)', placeholder: '8888, or 127.0.0.1:18789, or gpu-box2:6006',
+      desc: 'The service becomes http://localhost:<port> on this computer, over the SSH connection. Only this computer can use it. The same local port is tried first; otherwise a free one is picked.',
+    });
+    if (!spec) return;
+    const mm = /^(?:([\w.-]+):)?(\d{1,5})$/.exec(spec.trim());
+    if (!mm) { toast('Enter a port like 8888 or host:port', 'warn'); return; }
+    let r = await api.tunnelOpen({ machineId, remoteHost: mm[1] || '127.0.0.1', remotePort: Number(mm[2]), localPort: Number(mm[2]) });
+    if (!r.ok && /already in use/.test(r.error)) r = await api.tunnelOpen({ machineId, remoteHost: mm[1] || '127.0.0.1', remotePort: Number(mm[2]), localPort: 0 });
+    if (!r.ok) { toast(`Couldn't forward: ${r.error}`, 'bad'); return; }
+    await refreshTunnels();
+    toast(`localhost:${r.localPort} → ${m.name}:${r.remotePort}`, 'ok', 15000, { label: 'Open in browser', run: () => window.open(`http://localhost:${r.localPort}/`) });
+  }
+  async function closeTunnel(id) { await api.tunnelClose(id); await refreshTunnels(); toast('Port forwarding stopped'); }
+  async function refreshTunnels() { try { S.tunnels = await api.tunnelList(); } catch { S.tunnels = []; } }
 
   async function setupKey(machineId) {
     const m = machineById(machineId);
@@ -1604,7 +1630,8 @@
         <div class="field c3"><label>Host / IP</label><input class="mono" data-f="host" value="${esc(m.host)}" placeholder="192.168.1.50 or linuxbox.local"></div>
         <div class="field c1"><label>Port</label><input class="mono" type="number" data-f="port" value="${esc(m.port || 22)}"></div>
         <div class="field c6"><label>Tailscale address (optional; used when the LAN address can't be reached. Filled in automatically by Share)</label><input class="mono" data-f="tsHost" value="${esc(m.tsHost)}" placeholder="spark1.tail1234.ts.net"></div>
-        <div class="field c6"><label>Private key (optional; default tries ~/.ssh/id_ed25519, id_ecdsa, id_rsa, then ssh-agent)</label><input class="mono" data-f="keyPath" value="${esc(m.keyPath)}" placeholder="C:\\Users\\you\\.ssh\\id_ed25519"></div>` : ''}
+        <div class="field c3"><label>Private key (optional; default tries ~/.ssh/id_ed25519, id_ecdsa, id_rsa, then ssh-agent)</label><input class="mono" data-f="keyPath" value="${esc(m.keyPath)}" placeholder="C:\\Users\\you\\.ssh\\id_ed25519"></div>
+        <div class="field c3"><label>Jump host (optional, like ssh -J; blank uses ProxyJump from ~/.ssh/config)</label><input class="mono" data-f="jump" value="${esc(m.jump || '')}" placeholder="user@bastion.example.com:22"></div>` : ''}
       </div>
       ${ssh ? `<div class="m-form-actions">
         <button class="btn sm" data-sact="test">${I.plug} Test connection</button>
