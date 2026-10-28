@@ -1,7 +1,7 @@
 'use strict';
 (() => {
   const api = window.nexus;
-  const { fuzzy, mentions, isExeTitle } = window.NexusUtil;
+  const { fuzzy, mentions, isExeTitle, parseClaim, claimsOn } = window.NexusUtil;
   const IS_MAC = api.platform === 'darwin';
   const IS_WIN = api.platform === 'win32';
   document.body.classList.add(`platform-${api.platform}`);
@@ -46,6 +46,7 @@
     send: '<svg viewBox="0 0 24 24"><path d="M4 20l16-8L4 4v6l10 2-10 2z"/></svg>',
     gear: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg>',
     key: '<svg viewBox="0 0 24 24"><circle cx="7.5" cy="15.5" r="4"/><path d="M10.5 12.5L20 3M16 7l3 3M14 9l2 2"/></svg>',
+    clock: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
     box: '<svg viewBox="0 0 24 24"><path d="M21 8l-9-5-9 5 9 5 9-5zM3 8v8l9 5 9-5V8M12 13v8"/></svg>',
     layout: '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M12 3v18M3 12h9"/></svg>',
     folder: '<svg viewBox="0 0 24 24"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2.5h7.5A2.5 2.5 0 0 1 21 10v7.5a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z"/></svg>',
@@ -60,6 +61,7 @@
     cfg: null,
     mstate: {},           // machineId -> { status, error, tools, detached, hostname }
     tunnels: [],          // active port forwards: { id, machineId, localPort, remoteHost, remotePort }
+    queue: [],            // launches waiting for a machine to be free: { id, machineId, presetId, extra, why }
     sessions: new Map(),  // local id -> session
     byPid: new Map(),     // main-process id -> session
     early: new Map(),     // data that arrived before we mapped the pid
@@ -341,6 +343,7 @@
     if (m.type === 'ssh' && !m.host) { openSettings(); toast(`Add the address of ${m.name} first.`); return null; }
     if (isMissing(m, presetById(presetId)) && !extra.raw && !extra.script) toast(installHint(m, presetId), 'warn');
     if (!extra.raw && !extra.script && !extra.attach && !(await checkFolderConflict(machineId, presetId, extra.cwd))) return null;
+    if (!extra.raw && !extra.script && !extra.attach && !extra.queued && !(await checkClaim(machineId, presetId, extra))) return null;
     const s = makeSession(machineId, presetId, { announce: !extra.raw && !extra.script && !extra.attach, ...extra });
     show(s.id);
     await frame();
@@ -774,6 +777,17 @@
     $('#tabs .tab.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }
 
+  // "Claimed by Sam until 15:00 · fine-tuning" (others' claims and your own) and anything queued for this machine.
+  function claimHtml(m) {
+    if (m.type !== 'ssh') return '';
+    const parts = [];
+    const mine = myClaimOn(m.id);
+    if (mine) parts.push(`<div class="m-claim mine" title="/release ${esc(m.name)} to give it up">${I.key}<span>Yours until ${fmtTime(mine.until)}${mine.note ? ` · ${esc(mine.note)}` : ''}</span></div>`);
+    for (const c of claimedBy(m.id)) parts.push(`<div class="m-claim">${I.key}<span>${esc(c.person)} until ${fmtTime(c.until)}${c.note ? ` · ${esc(c.note)}` : ''}</span></div>`);
+    const q = S.queue.filter((x) => x.machineId === m.id);
+    if (q.length) parts.push(`<div class="m-claim queued">${I.clock}<span>${q.length} launch${q.length > 1 ? 'es' : ''} queued until free</span></div>`);
+    return parts.join('');
+  }
   function machineCard(m) {
     const st = S.mstate[m.id] || {};
     const status = m.type === 'local' ? 'online' : (st.status || 'offline');
@@ -812,6 +826,7 @@
         </div>
       </div>
       ${status === 'error' && st.error ? `<div class="m-error">${esc(st.error)}<br><button data-act="settings">Open settings</button></div>` : ''}
+      ${claimHtml(m)}
       ${statsHtml(m)}
       <div class="launchers">${launchers}</div>
       ${items ? `<div class="s-list">${items}</div>` : ''}
@@ -876,7 +891,7 @@
       if (el) el.outerHTML = statsHtml(m);
     }
   }
-  setInterval(pollStats, 5000);
+  setInterval(async () => { await pollStats(); await runQueue(); }, 5000);
 
   // ---------------------------------------------------------------- session persistence + workspaces
   const persistable = (s) => !s.spec.raw && !s.spec.script;
@@ -1559,6 +1574,7 @@
     cmd('Share machines over Tailscale…', openShare, '', I.send);
     cmd('Team chat', () => openTeam(), 'Ctrl+Shift+M', I.send);
     cmd('Save layout as workspace…', saveWorkspace, '', I.save);
+    cmd('Queue: launches waiting for a free machine…', openQueue, '', I.layout);
     cmd('Export workspaces and presets…', exportWorkspaces, '', I.send);
     cmd('Import workspaces and presets…', importWorkspaces, '', I.folder);
     cmd('Publish my presets to the team', publishPresets, '', I.send);
@@ -2095,7 +2111,7 @@
   // ---------------------------------------------------------------- team chat + presence
   // Chat and presence live on one "hub" SSH machine (~/.nexus/collab). Everyone's Nexus reads/writes them over its own
   // SSH connection; presence (who has which session open) drives the "someone's already in there" warnings.
-  const TM = { hubId: null, live: false, messages: [], seen: new Set(), presence: [], unread: 0, open: false, status: '', starting: false };
+  const TM = { hubId: null, live: false, messages: [], seen: new Set(), presence: [], unread: 0, open: false, status: '', starting: false, claims: [] };
   const collabCfg = () => (S.cfg.collab = S.cfg.collab || {});
   const myClient = () => collabCfg().client;
   const myName = () => collabCfg().name || (S.tsUser && S.tsUser.name) || 'Me';
@@ -2141,7 +2157,8 @@
   }
   async function heartbeat() {
     if (!TM.live) { ensureHub(); return; }
-    const r = await api.collabHeartbeat({ ...me(), status: TM.status, sessions: mySessions() });
+    TM.claims = TM.claims.filter((c) => c.until > now());
+    const r = await api.collabHeartbeat({ ...me(), status: TM.status, sessions: mySessions(), claims: TM.claims });
     if (r.ok) { TM.presence = r.presence; renderTeam(); renderChrome(); }
   }
 
@@ -2221,6 +2238,57 @@
     return v === 'go';
   }
 
+  // Someone claimed the machine (/claim): ask before starting an agent there, or queue it until the machine is free.
+  async function checkClaim(machineId, presetId, extra) {
+    if (!isAgent({ presetId }) || machineById(machineId).type !== 'ssh') return true;
+    const claims = claimedBy(machineId);
+    if (!claims.length) return true;
+    const c = claims[0];
+    const v = await choose({
+      title: `${machineById(machineId).name} is claimed`,
+      desc: `${c.person} claimed it until ${fmtTime(c.until)}${c.note ? ` (${c.note})` : ''}. Starting ${presetById(presetId).name} now competes for its GPU and memory.`,
+      options: [{ label: 'Cancel', value: null, ghost: true }, { label: `Message ${c.person}`, value: 'msg' }, { label: 'Start when free', value: 'queue' }, { label: 'Start anyway', value: 'go', primary: true }],
+    });
+    if (v === 'msg') { openTeam(`@${c.person.split(/\s+/)[0]} `); return false; }
+    if (v === 'queue') { enqueue(machineId, presetId, extra, `until ${c.person}'s claim ends`); return false; }
+    return v === 'go';
+  }
+
+  // ---- launch queue: start an agent once a machine is unclaimed and its GPU is idle ----
+  const GPU_IDLE = 20; // % utilisation below which a GPU counts as free, for two samples in a row
+  function enqueue(machineId, presetId, extra, why) {
+    S.queue.push({ id: `q${Date.now().toString(36)}`, machineId, presetId, extra: { ...extra }, why, idleSamples: 0, at: now() });
+    toast(`Queued ${presetById(presetId).name} on ${machineById(machineId).name} ${why}. Nexus starts it when the machine is free (see Ctrl+Shift+P → Queue).`, 'ok', 6000);
+    renderSidebar();
+  }
+  function machineFree(machineId) {
+    if (claimedBy(machineId).length) return false;
+    const x = (S.mstate[machineId] || {}).stats;
+    return !x || !x.gpu || x.gpu.error || x.gpu.util == null || x.gpu.util < GPU_IDLE;
+  }
+  async function runQueue() {
+    for (const q of [...S.queue]) {
+      if ((S.mstate[q.machineId] || {}).status !== 'online') continue;
+      q.idleSamples = machineFree(q.machineId) ? q.idleSamples + 1 : 0;
+      if (q.idleSamples < 2) continue;
+      S.queue = S.queue.filter((x) => x !== q);
+      const m = machineById(q.machineId), p = presetById(q.presetId);
+      api.notify({ title: `${m.name} is free`, body: `Starting ${p.name}${q.extra.cwd ? ` in ${q.extra.cwd}` : ''}` });
+      toast(`${m.name} is free: starting ${p.name}`, 'ok', 5000);
+      await launch(q.machineId, q.presetId, { ...q.extra, queued: true });
+    }
+  }
+  function openQueue() {
+    openPicker({
+      placeholder: S.queue.length ? 'Queued launches (select to cancel)…' : 'Nothing is queued. Launching on a claimed machine offers "Start when free".',
+      items: () => S.queue.map((q) => ({
+        group: 'Queue', glyph: q.presetId, m: q.machineId, c: presetById(q.presetId).color,
+        label: `${presetById(q.presetId).name} on ${machineById(q.machineId).name}${q.extra.cwd ? ` · ${baseName(q.extra.cwd)}` : ''}`,
+        sub: `waiting ${q.why} · cancel`, run: () => { S.queue = S.queue.filter((x) => x !== q); renderSidebar(); toast('Removed from the queue'); },
+      })),
+    });
+  }
+
   // ---- chat drawer ----
   function openTeam(prefill) {
     TM.open = true;
@@ -2285,7 +2353,7 @@
       prev = m;
       return cont ? `<div class="tm-msg cont"><div class="tm-text">${linkify(m.text)}</div></div>`
         : `<div class="tm-msg">${avatar(m.from.name)}<div class="tm-body"><div class="tm-meta">${who(m.from)}<span class="dim">${fmtTime(m.ts)}</span></div><div class="tm-text">${linkify(m.text)}</div></div></div>`;
-    }).join('') || '<div class="tm-empty">No messages yet. Say what you\'re working on so nobody doubles up.<br><span class="dim">Tip: <b>/status Training on the GPU box until 3pm</b> sets your status.</span></div>';
+    }).join('') || '<div class="tm-empty">No messages yet. Say what you\'re working on so nobody doubles up.<br><span class="dim">Tips: <b>/status Training on the GPU box until 3pm</b> sets your status · <b>/claim gpu-box 2h fine-tuning</b> claims a machine (<b>/release gpu-box</b> when done).</span></div>';
     if (scroll || atBottom) list.scrollTop = list.scrollHeight;
   }
 
@@ -2302,8 +2370,30 @@
       if (await postTeam(TM.status, 'status')) { input.value = ''; heartbeat(); }
       return;
     }
+    if (/^\/claim\b/.test(text)) {
+      const c = parseClaim(text);
+      if (!c) { toast('Usage: /claim <machine> <2h | 45m | 15:00> [what for]', 'warn'); return; }
+      const m = machineByHostOrName(c.host);
+      if (!m) { toast(`No machine called "${c.host}". Use a machine's name or hostname`, 'warn'); return; }
+      c.host = hostOf(m.id) || c.host;
+      TM.claims = [...TM.claims.filter((x) => x.host !== c.host), c];
+      if (await postTeam(`claimed ${m.name} until ${fmtTime(c.until)}${c.note ? ` · ${c.note}` : ''}`, 'activity')) { input.value = ''; heartbeat(); renderSidebar(); }
+      return;
+    }
+    const rl = /^\/release\s+(\S+)/.exec(text);
+    if (rl) {
+      const m = machineByHostOrName(rl[1]);
+      const host = m ? hostOf(m.id) : rl[1];
+      TM.claims = TM.claims.filter((x) => x.host !== host);
+      if (await postTeam(`released ${m ? m.name : rl[1]}`, 'activity')) { input.value = ''; heartbeat(); renderSidebar(); }
+      return;
+    }
     if (await postTeam(text)) input.value = '';
   }
+  const machineByHostOrName = (x) => S.cfg.machines.find((m) => m.type === 'ssh' && (hostOf(m.id).toLowerCase() === String(x).toLowerCase() || m.name.toLowerCase() === String(x).toLowerCase()));
+  // Claims on a machine by other people (not expired), for cards and launch checks.
+  const claimedBy = (machineId) => claimsOn(TM.presence, hostOf(machineId), myClient());
+  const myClaimOn = (machineId) => TM.claims.find((c) => c.host === hostOf(machineId) && c.until > now());
 
   // Others' presence on my sidebar items: who else is in a session / has a detached one open.
   function othersOnSession(machineId, tmux) {

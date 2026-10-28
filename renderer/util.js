@@ -57,5 +57,33 @@
     return /^(administrator:\s*)?([a-z]:\\|\\\\).*\.exe$/i.test(title) || /^[\w.-]+\.exe$/i.test(title);
   }
 
-  return { fuzzy, mentions, isExeTitle };
+  // Parse "/claim <host> <duration> [note]" where duration is like 2h, 45m, 1h30m, or a clock time 15:00.
+  function parseClaim(text, now = Date.now()) {
+    const m = /^\/claim\s+(\S+)\s+(\S+)\s*(.*)$/s.exec(String(text || ''));
+    if (!m) return null;
+    const [, host, dur, note] = m;
+    let until = null;
+    let d;
+    if ((d = /^(\d{1,2}):(\d{2})$/.exec(dur))) {
+      const t = new Date(now); t.setHours(Number(d[1]), Number(d[2]), 0, 0);
+      if (t.getTime() <= now) t.setDate(t.getDate() + 1);
+      until = t.getTime();
+    } else if ((d = /^(?:(\d+)h)?(?:(\d+)m)?$/.exec(dur)) && (d[1] || d[2])) {
+      until = now + (Number(d[1] || 0) * 60 + Number(d[2] || 0)) * 60000;
+    }
+    if (!until) return null;
+    return { host: host.slice(0, 64), until, note: note.trim().slice(0, 120) };
+  }
+
+  // Who currently claims `host` (presence entries other than `client`, claims not yet expired).
+  function claimsOn(presence, host, client = null, now = Date.now()) {
+    const out = [];
+    for (const p of presence || []) {
+      if (!p || (client && p.client === client)) continue;
+      for (const c of p.claims || []) if (c.host === host && c.until > now) out.push({ person: p.name, ...c });
+    }
+    return out;
+  }
+
+  return { fuzzy, mentions, isExeTitle, parseClaim, claimsOn };
 });
