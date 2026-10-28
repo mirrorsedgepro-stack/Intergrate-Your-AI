@@ -379,10 +379,13 @@ function tsToken() {
   if (!enc || !secureStorageOk()) return null;
   try { return safeStorage.decryptString(Buffer.from(enc, 'base64')); } catch { return null; }
 }
+// One client per saved credential, so an OAuth client's 1-hour access token is reused across calls.
+let tsClient = null;
 function tsApi() {
   const t = tsToken();
-  if (!t) throw new Error('Add a Tailscale API access token first');
-  return new tailscale.TailscaleApi(t);
+  if (!t) throw new Error('Add a Tailscale API access token or OAuth client first');
+  if (!tsClient || tsClient.raw !== t) tsClient = { raw: t, api: new tailscale.TailscaleApi(t) };
+  return tsClient.api;
 }
 const matchDevices = (devices, machines, self) => tailscale.matchDevices(devices, machines, self);
 const selfName = async () => { try { const l = await tailscale.localStatus(); return (l.self && l.self.dnsName) || ''; } catch { return ''; } };
@@ -393,12 +396,14 @@ let lastPlan = null;
 ipcMain.handle('ts:status', async () => ({
   local: await tailscale.localStatus(),
   hasToken: !!tsToken(),
+  tokenKind: ((c) => (c ? c.kind : null))(tailscale.parseCredential(tsToken() || '')),
   canEncrypt: secureStorageOk(),
 }));
 ipcMain.handle('ts:set-token', safe(async (_e, token) => {
   const t = String(token || '').trim();
-  if (!/^tskey-api-/.test(t)) throw new Error('That does not look like an API access token (it starts with tskey-api-)');
-  const devices = await new tailscale.TailscaleApi(t).devices(); // validates the token
+  const cred = tailscale.parseCredential(t);
+  if (!cred) throw new Error('That does not look like a Tailscale credential: paste an API access token (tskey-api-…) or an OAuth client secret (tskey-client-…, optionally as clientId:secret)');
+  const devices = await new tailscale.TailscaleApi(cred).devices(); // validates the credential (and, for OAuth, its scopes)
   if (!secureStorageOk()) throw new Error('Secure storage (Windows DPAPI, macOS Keychain or a Linux keyring such as gnome-keyring/KWallet) is unavailable; the token was not saved');
   const c = config.load();
   c.tailscale = { ...(c.tailscale || {}), token: safeStorage.encryptString(t).toString('base64') };
@@ -408,6 +413,7 @@ ipcMain.handle('ts:set-token', safe(async (_e, token) => {
 ipcMain.handle('ts:clear-token', () => {
   const c = config.load();
   if (c.tailscale) delete c.tailscale.token;
+  tsClient = null;
   config.save(c);
   return true;
 });

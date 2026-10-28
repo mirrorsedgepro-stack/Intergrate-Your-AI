@@ -1964,10 +1964,15 @@
 
     // 3. API token
     const token = ts.hasToken
-      ? `<p>API token saved, encrypted with your Windows account. <button class="linklike" data-sh="cleartoken">Remove</button></p>`
-      : `<p>Nexus needs a Tailscale <b>API access token</b> to send invites and set access rules. Create one at
-         <a href="https://login.tailscale.com/admin/settings/keys" target="_blank">login.tailscale.com → Settings → Keys</a> ("Generate access token…"), then paste it here.</p>
-         <div class="sh-inline"><input type="password" id="sh-token" placeholder="tskey-api-…" spellcheck="false"><button class="btn sm primary" data-sh="savetoken">Save</button></div>`;
+      ? `<p>${ts.tokenKind === 'oauth' ? 'OAuth client' : 'API token'} saved, encrypted with your ${IS_MAC ? 'Keychain' : IS_WIN ? 'Windows account' : 'keyring'}.${ts.tokenKind === 'api' ? ' <span class="dim">Tip: an OAuth client scoped to Nexus is safer than a personal token and never expires.</span>' : ''} <button class="linklike" data-sh="cleartoken">Remove</button></p>`
+      : `<p>Nexus needs a Tailscale credential to send invites and set access rules. <b>Recommended:</b> an <b>OAuth client</b> at
+         <a href="https://login.tailscale.com/admin/settings/oauth" target="_blank">login.tailscale.com → Settings → OAuth clients</a> with the scopes
+         <span class="mono">devices:core</span> (tag <span class="mono">tag:nexus-spark</span>), <span class="mono">policy_file</span> and <span class="mono">users</span>; paste its secret
+         (<span class="mono">tskey-client-…</span>). It only has the rights Nexus needs and never expires. (The tag must exist first: add
+         <span class="mono">"tag:nexus-spark": ["autogroup:admin"]</span> under <span class="mono">tagOwners</span> in your policy file, or run Review → Apply once with an API token.) Alternatively, an <b>API access token</b>
+         (<span class="mono">tskey-api-…</span>, your full admin rights, expires within 90 days) from
+         <a href="https://login.tailscale.com/admin/settings/keys" target="_blank">Settings → Keys</a>.</p>
+         <div class="sh-inline"><input type="password" id="sh-token" placeholder="tskey-client-… or tskey-api-…" spellcheck="false"><button class="btn sm primary" data-sh="savetoken">Save</button></div>`;
 
     // 4. Access rules
     let rules = '';
@@ -2004,7 +2009,7 @@
       ${SH.error ? `<div class="m-error">${esc(SH.error)}</div>` : ''}
       ${step(1, 'This PC on Tailscale', pc, pcDone ? 'done' : '')}
       ${step(2, 'Machines on your tailnet', `<div class="sh-rows">${rows}</div><p class="dim small">"Join Tailscale" opens a terminal on that machine running <span class="mono">sudo tailscale up --ssh</span>: type the sudo password, then open the login link it prints.</p>`, sparksDone ? 'done' : '')}
-      ${step(3, 'Tailscale API token', token, ts.hasToken ? 'done' : '')}
+      ${step(3, 'Tailscale credential', token, ts.hasToken ? 'done' : '')}
       ${ts.hasToken ? step(4, 'Access rules', rules) : ''}
       ${ts.hasToken ? step(5, 'Guests', guests) : ''}
       <section class="sh-join"><h3>Got an invite code?</h3><p class="dim">Sign in to Tailscale with the invite link first, then paste the code to add the shared machines.</p>
@@ -2072,7 +2077,7 @@
     if (act === 'savetoken') return busy('token', async () => {
       const r = await api.tsSetToken($('#sh-token').value);
       if (!r.ok) throw new Error(r.error);
-      toast(`Token saved. ${r.devices} devices on your tailnet.`, 'ok');
+      toast(`Credential saved. ${r.devices} devices on your tailnet.`, 'ok');
       await refreshShare();
     });
     if (act === 'cleartoken') { await api.tsClearToken(); SH.overview = null; return refreshShare(); }

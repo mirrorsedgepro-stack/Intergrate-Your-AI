@@ -118,3 +118,34 @@ test('planPolicy per-guest mode: admins keep the shared rule, each guest gets th
   assert.ok(!moved.policy.ssh.some((r) => r.src.includes(GUEST_GROUP) && r.dst[0] === SPARK_TAG));
   assert.ok(moved.changes.some((c) => /no longer share/.test(c)));
 });
+
+test('credentials: API tokens and OAuth client secrets are told apart; anything else is refused', () => {
+  const { parseCredential } = require('../lib/tailscale');
+  assert.deepEqual(parseCredential(' tskey-api-kAbC123CNTRL-xyz '), { kind: 'api', token: 'tskey-api-kAbC123CNTRL-xyz' });
+  assert.deepEqual(parseCredential('tskey-client-kAbC123CNTRL-secret_Part'), { kind: 'oauth', clientId: null, secret: 'tskey-client-kAbC123CNTRL-secret_Part' });
+  assert.deepEqual(parseCredential('kAbC123CNTRL:tskey-client-kAbC123CNTRL-secret'), { kind: 'oauth', clientId: 'kAbC123CNTRL', secret: 'tskey-client-kAbC123CNTRL-secret' });
+  for (const bad of ['', 'tskey-auth-abc', 'Bearer tskey-api-x', 'tskey-api-x y', null]) assert.equal(parseCredential(bad), null, String(bad));
+});
+
+test('OAuth clients exchange the secret for an access token once per hour', async () => {
+  const { TailscaleApi } = require('../lib/tailscale');
+  const calls = [];
+  const realFetch = global.fetch;
+  global.fetch = async (url, opts = {}) => {
+    calls.push({ url, auth: (opts.headers || {}).Authorization, body: opts.body && opts.body.toString() });
+    if (String(url).endsWith('/oauth/token')) return { ok: true, status: 200, text: async () => JSON.stringify({ access_token: 'tskey-api-fresh', expires_in: 3600 }) };
+    return { ok: true, status: 200, statusText: 'OK', text: async () => JSON.stringify({ devices: [{ id: 1 }] }), headers: new Map() };
+  };
+  try {
+    const api = new TailscaleApi('kID:tskey-client-secret');
+    assert.equal((await api.devices()).length, 1);
+    await api.devices();
+    assert.equal(calls.filter((c) => String(c.url).endsWith('/oauth/token')).length, 1, 'one exchange serves both calls');
+    assert.match(calls[0].body, /client_secret=tskey-client-secret/);
+    assert.match(calls[0].body, /client_id=kID/);
+    assert.equal(calls[1].auth, 'Bearer tskey-api-fresh');
+    const plain = new TailscaleApi('tskey-api-mine');
+    await plain.devices();
+    assert.equal(calls[calls.length - 1].auth, 'Bearer tskey-api-mine', 'API tokens are used as-is');
+  } finally { global.fetch = realFetch; }
+});
