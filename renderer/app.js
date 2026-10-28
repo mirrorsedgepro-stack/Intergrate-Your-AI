@@ -818,11 +818,14 @@
     const hot = p >= 85 ? 'hot' : p >= 60 ? 'warm' : '';
     return `<div class="meter ${hot}" title="${esc(title)}"><span class="ml">${label}</span><span class="mv">${value}</span><span class="mb"><i style="width:${p}%"></i></span></div>`;
   }
+  // Bytes/second -> "12.3 MB/s" (short, for a meter value).
+  const bps = (v) => (v == null ? '-' : v >= 1024 ** 2 ? `${(v / 1024 ** 2).toFixed(v >= 10 * 1024 ** 2 ? 0 : 1)} MB/s` : v >= 1024 ? `${Math.round(v / 1024)} kB/s` : `${Math.round(v)} B/s`);
+  // Local and WSL machines have stats too (this computer / the distro), without the "online" gate SSH machines need.
+  const statsLive = (m, st) => m.type !== 'ssh' || st.status === 'online';
   function statsHtml(m) {
-    if (m.type !== 'ssh') return '';
     const st = S.mstate[m.id] || {};
     const x = st.stats;
-    if (!x || st.status !== 'online') return '<div class="m-stats" data-stats="' + m.id + '"></div>';
+    if (!x || !statsLive(m, st)) return '<div class="m-stats" data-stats="' + m.id + '"></div>';
     const parts = [];
     if (x.gpu && x.gpu.error) {
       parts.push(`<div class="meter gpu-err" title="${esc(x.gpu.error)}"><span class="ml">GPU</span><span class="mv">driver unavailable</span><span class="mb"><i style="width:0"></i></span></div>`);
@@ -835,14 +838,26 @@
       parts.push(meter('RAM', (used / x.memTotal) * 100, `${gb(used)}/${gb(x.memTotal)} GB`, 'System memory (shared with the GPU on unified-memory machines)'));
     }
     if (x.load != null && x.cpus) parts.push(meter('CPU', (x.load / x.cpus) * 100, `${x.load.toFixed(1)} / ${x.cpus}`, '1-minute load average / cores'));
+    if (x.disk && x.disk.total) {
+      // Used vs. total of the filesystem the home folder lives on; the bar follows what's left, which is what runs out.
+      const pct = ((x.disk.total - (x.disk.avail || 0)) / x.disk.total) * 100;
+      parts.push(meter('DISK', pct, `${gb(x.disk.avail || 0)} GB free of ${gb(x.disk.total)}`, `Filesystem of the home folder (${x.disk.mount || '/'}): ${gb(x.disk.used || 0)} GB used`));
+    }
+    if (x.net) {
+      // Throughput since the previous sample (5 s): the bar is log-scaled so 100 kB/s and 1 GB/s are both visible.
+      const tot = (x.net.rxBps || 0) + (x.net.txBps || 0);
+      const pct = tot > 0 ? Math.min(100, (Math.log10(tot) - 3) / 6 * 100) : 0; // 1 kB/s -> 0%, 1 GB/s -> 100%
+      parts.push(meter('NET', Math.max(0, pct), `↓${bps(x.net.rxBps)} ↑${bps(x.net.txBps)}`, `Network in / out (all interfaces); total ${gb(x.net.rx)} GB received, ${gb(x.net.tx)} GB sent since boot`)
+        .replace('class="meter', 'class="meter net'));
+    }
     return `<div class="m-stats" data-stats="${m.id}">${parts.join('')}</div>`;
   }
   async function pollStats() {
     for (const m of S.cfg.machines) {
-      if (m.type !== 'ssh' || (S.mstate[m.id] || {}).status !== 'online') continue;
+      if (!statsLive(m, S.mstate[m.id] || {})) continue;
       const r = await api.stats(m.id);
       if (!r.ok || !r.stats) continue;
-      S.mstate[m.id].stats = r.stats;
+      (S.mstate[m.id] = S.mstate[m.id] || {}).stats = r.stats;
       const el = document.querySelector(`[data-stats="${m.id}"]`);
       if (el) el.outerHTML = statsHtml(m);
     }

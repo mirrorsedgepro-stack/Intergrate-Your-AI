@@ -355,6 +355,7 @@ body.dragging-h, body.dragging-h * { cursor: row-resize !important; user-select:
 .meter .mb i { display: block; height: 100%; border-radius: 4px; background: var(--c); transition: width .6s ease; }
 .meter.warm .mb i { background: var(--warn); }
 .meter.hot .mb i { background: var(--bad); }
+.meter.net.warm .mb i, .meter.net.hot .mb i { background: var(--c); } /* throughput is activity, not a problem */
 
 /* ---------- drop target / chips with icons ---------- */
 .term-host.drop::after { content: 'Drop to attach files'; position: absolute; inset: -4px; display: grid; place-items: center; border-radius: 10px; border: 2px dashed rgba(187,154,247,.6); background: rgba(9,12,19,.7); color: var(--text); font: 600 13px var(--ui); z-index: 10; }

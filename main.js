@@ -319,7 +319,13 @@ ipcMain.handle('machine:probe', safe((_e, id) => {
   const m = machineCfg(id);
   return m && m.type === 'wsl' ? local.wslProbe(m.distro) : getMachine(id).probe();
 }));
-ipcMain.handle('machine:stats', safe(async (_e, id) => ({ stats: await getMachine(id).stats() })));
+ipcMain.handle('machine:stats', safe(async (_e, id) => {
+  const m = machineCfg(id);
+  if (!m) throw new Error('Unknown machine');
+  if (m.type === 'local') return { stats: await local.stats() };
+  if (m.type === 'wsl') return { stats: await local.wslStats(m.distro) };
+  return { stats: await getMachine(id).stats() };
+}));
 ipcMain.handle('machine:dirs', safe((_e, id) => {
   const m = machineCfg(id);
   return m && m.type === 'wsl' ? local.wslDirs(m.distro) : getMachine(id).listDirs();
