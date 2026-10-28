@@ -96,3 +96,56 @@ test('matchDevices: tailnet name first, ambiguous hostnames and this PC are neve
   assert.strictEqual(dup.ambiguous, true);
   assert.strictEqual(spoof.device, null, 'never tag this PC');
 });
+
+test('planPolicy per-guest mode: admins keep the shared rule, each guest gets their own account, removed guests lose theirs', () => {
+  const { guestUser } = require('../lib/tailscale');
+  assert.strictEqual(guestUser('Alice.Smith+gpu@example.com'), 'nexus-alice-smith-gpu');
+  const first = planPolicy(DEFAULT, { guests: ['alice@x.com', 'bob@x.com'], sshUsers: ['jcee'], perGuestUsers: true });
+  const shared = first.policy.ssh.find((r) => r.dst[0] === SPARK_TAG && r.src.length === 1 && r.src[0] === 'autogroup:admin');
+  assert.deepStrictEqual(shared.users, ['jcee']);
+  assert.ok(!first.policy.ssh.some((r) => r.src.includes(GUEST_GROUP)), 'guests do not get the shared account');
+  const alice = first.policy.ssh.find((r) => r.src[0] === 'alice@x.com');
+  assert.deepStrictEqual(alice.users, ['nexus-alice']);
+  // idempotent
+  assert.deepStrictEqual(planPolicy(first.policy, { guests: ['alice@x.com', 'bob@x.com'], sshUsers: ['jcee'], perGuestUsers: true }).changes, []);
+  // removing bob drops his rule
+  const less = planPolicy(first.policy, { guests: ['alice@x.com'], sshUsers: ['jcee'], perGuestUsers: true });
+  assert.ok(!less.policy.ssh.some((r) => r.src[0] === 'bob@x.com'));
+  assert.ok(less.changes.some((c) => /remove bob@x.com/.test(c)));
+  // switching an existing shared-mode policy to per-guest narrows the legacy rule
+  const sharedMode = planPolicy(DEFAULT, { guests: ['alice@x.com'], sshUsers: ['jcee'] }).policy;
+  const moved = planPolicy(sharedMode, { guests: ['alice@x.com'], sshUsers: ['jcee'], perGuestUsers: true });
+  assert.ok(!moved.policy.ssh.some((r) => r.src.includes(GUEST_GROUP) && r.dst[0] === SPARK_TAG));
+  assert.ok(moved.changes.some((c) => /no longer share/.test(c)));
+});
+
+test('credentials: API tokens and OAuth client secrets are told apart; anything else is refused', () => {
+  const { parseCredential } = require('../lib/tailscale');
+  assert.deepEqual(parseCredential(' tskey-api-kAbC123CNTRL-xyz '), { kind: 'api', token: 'tskey-api-kAbC123CNTRL-xyz' });
+  assert.deepEqual(parseCredential('tskey-client-kAbC123CNTRL-secret_Part'), { kind: 'oauth', clientId: null, secret: 'tskey-client-kAbC123CNTRL-secret_Part' });
+  assert.deepEqual(parseCredential('kAbC123CNTRL:tskey-client-kAbC123CNTRL-secret'), { kind: 'oauth', clientId: 'kAbC123CNTRL', secret: 'tskey-client-kAbC123CNTRL-secret' });
+  for (const bad of ['', 'tskey-auth-abc', 'Bearer tskey-api-x', 'tskey-api-x y', null]) assert.equal(parseCredential(bad), null, String(bad));
+});
+
+test('OAuth clients exchange the secret for an access token once per hour', async () => {
+  const { TailscaleApi } = require('../lib/tailscale');
+  const calls = [];
+  const realFetch = global.fetch;
+  global.fetch = async (url, opts = {}) => {
+    calls.push({ url, auth: (opts.headers || {}).Authorization, body: opts.body && opts.body.toString() });
+    if (String(url).endsWith('/oauth/token')) return { ok: true, status: 200, text: async () => JSON.stringify({ access_token: 'tskey-api-fresh', expires_in: 3600 }) };
+    return { ok: true, status: 200, statusText: 'OK', text: async () => JSON.stringify({ devices: [{ id: 1 }] }), headers: new Map() };
+  };
+  try {
+    const api = new TailscaleApi('kID:tskey-client-secret');
+    assert.equal((await api.devices()).length, 1);
+    await api.devices();
+    assert.equal(calls.filter((c) => String(c.url).endsWith('/oauth/token')).length, 1, 'one exchange serves both calls');
+    assert.match(calls[0].body, /client_secret=tskey-client-secret/);
+    assert.match(calls[0].body, /client_id=kID/);
+    assert.equal(calls[1].auth, 'Bearer tskey-api-fresh');
+    const plain = new TailscaleApi('tskey-api-mine');
+    await plain.devices();
+    assert.equal(calls[calls.length - 1].auth, 'Bearer tskey-api-mine', 'API tokens are used as-is');
+  } finally { global.fetch = realFetch; }
+});

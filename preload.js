@@ -1,5 +1,10 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
+// Paths that came out of a real drag-and-drop (webUtils.getPathForFile) in this renderer. upload-files only accepts
+// these, so a compromised page can't name an arbitrary local file (~/.ssh/id_ed25519) to ship to a remote machine.
+const dropped = new Set();
+const pathForFile = (file) => { const p = webUtils.getPathForFile(file); if (p) dropped.add(p); return p; };
+
 const on = (ch) => (fn) => {
   const h = (_e, ...a) => fn(...a);
   ipcRenderer.on(ch, h);
@@ -20,7 +25,8 @@ contextBridge.exposeInMainWorld('nexus', {
   flash: () => ipcRenderer.send('app:flash'),
   readClipboard: () => ipcRenderer.invoke('clipboard:read'),
   writeClipboard: (t) => ipcRenderer.send('clipboard:write', t),
-  pathForFile: (file) => webUtils.getPathForFile(file),
+  pathForFile,
+  downloadUpdate: () => ipcRenderer.send('update:download'),
   installUpdate: () => ipcRenderer.send('update:install'),
   answerPassphrase: (id, value) => ipcRenderer.send('auth:answer', id, value),
   answerHost: (id, ok) => ipcRenderer.send('auth:host-answer', id, ok === true),
@@ -41,8 +47,9 @@ contextBridge.exposeInMainWorld('nexus', {
   resize: (id, cols, rows) => ipcRenderer.send('session:resize', id, cols, rows),
   close: (id, opts) => ipcRenderer.invoke('session:close', id, opts),
   cwd: (id) => ipcRenderer.invoke('session:cwd', id),
+  agentStatus: (id) => ipcRenderer.invoke('session:agent-status', id),
   pasteImage: (id) => ipcRenderer.invoke('session:paste-image', id),
-  uploadFiles: (id, paths) => ipcRenderer.invoke('session:upload-files', id, paths),
+  uploadFiles: (id, paths) => ipcRenderer.invoke('session:upload-files', id, (paths || []).filter((p) => dropped.has(p))),
 
   tsStatus: () => ipcRenderer.invoke('ts:status'),
   tsSetToken: (t) => ipcRenderer.invoke('ts:set-token', t),
@@ -52,8 +59,22 @@ contextBridge.exposeInMainWorld('nexus', {
   tsApply: (plan) => ipcRenderer.invoke('ts:apply', plan),
   tsInvite: (email) => ipcRenderer.invoke('ts:invite', email),
   tsRevoke: (args) => ipcRenderer.invoke('ts:revoke', args),
+  tsGuestUser: (email) => ipcRenderer.invoke('ts:guest-user', email),
+  tsSetMode: (args) => ipcRenderer.invoke('ts:set-mode', args),
   tsEncodeInvite: (data) => ipcRenderer.invoke('ts:encode-invite', data),
   tsDecodeInvite: (code) => ipcRenderer.invoke('ts:decode-invite', code),
+
+  exportWorkspaces: () => ipcRenderer.invoke('app:export-workspaces'),
+  importWorkspaces: () => ipcRenderer.invoke('app:import-workspaces'),
+  collabPresetsGet: () => ipcRenderer.invoke('collab:presets-get'),
+  collabPresetsPut: (presets) => ipcRenderer.invoke('collab:presets-put', presets),
+  mcpStatus: () => ipcRenderer.invoke('mcp:status'),
+  mcpLaunched: (r) => ipcRenderer.send('mcp:launched', r),
+  onMcpLaunch: on('mcp:launch'),
+  onMcpClose: on('mcp:close'),
+  tunnelOpen: (args) => ipcRenderer.invoke('tunnel:open', args),
+  tunnelClose: (id) => ipcRenderer.invoke('tunnel:close', id),
+  tunnelList: () => ipcRenderer.invoke('tunnel:list'),
 
   collabStart: (machineId) => ipcRenderer.invoke('collab:start', machineId),
   collabStop: () => ipcRenderer.invoke('collab:stop'),

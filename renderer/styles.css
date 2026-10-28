@@ -355,6 +355,12 @@ body.dragging-h, body.dragging-h * { cursor: row-resize !important; user-select:
 .meter .mb i { display: block; height: 100%; border-radius: 4px; background: var(--c); transition: width .6s ease; }
 .meter.warm .mb i { background: var(--warn); }
 .meter.hot .mb i { background: var(--bad); }
+.chip.ask { --mc: var(--warn); }
+.m-claim { display: flex; align-items: center; gap: 6px; margin-top: 8px; font: 11px var(--ui); color: var(--warn); }
+.m-claim svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.8; flex: none; }
+.m-claim.mine { color: var(--text-2); }
+.m-claim.queued { color: var(--text-3); }
+.meter.net.warm .mb i, .meter.net.hot .mb i { background: var(--c); } /* throughput is activity, not a problem */
 
 /* ---------- drop target / chips with icons ---------- */
 .term-host.drop::after { content: 'Drop to attach files'; position: absolute; inset: -4px; display: grid; place-items: center; border-radius: 10px; border: 2px dashed rgba(187,154,247,.6); background: rgba(9,12,19,.7); color: var(--text); font: 600 13px var(--ui); z-index: 10; }

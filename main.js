@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, clipboard, shell, Notification, Menu, safeStorage } = require('electron');
+const { app, BrowserWindow, ipcMain, clipboard, shell, Notification, Menu, safeStorage, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -9,6 +9,8 @@ const platform = require('./lib/platform');
 const { Machine } = require('./lib/remote');
 const tailscale = require('./lib/tailscale');
 const collab = require('./lib/collab');
+const { Tunnel } = require('./lib/tunnel');
+const { McpServer } = require('./lib/mcp');
 
 if (!app.requestSingleInstanceLock()) app.quit();
 app.setAppUserModelId('com.nexus.terminal');
@@ -59,8 +61,11 @@ function send(ch, ...args) {
 // ---- output batching: coalesce chunks per session into ~4ms frames ----
 const pending = new Map();
 let flushTimer = null;
+const OUT_KEEP = 64 * 1024; // recent output per session, for the MCP read_output tool
 function emitData(id, data) {
   if (!data) return;
+  const s = sessions.get(id);
+  if (s) s.recent = ((s.recent || '') + data).slice(-OUT_KEEP);
   pending.set(id, (pending.get(id) || '') + data);
   if (!flushTimer) flushTimer = setTimeout(flush, 4);
 }
@@ -174,15 +179,24 @@ async function checkReleaseNotice() {
 }
 function setupUpdates() {
   if (!app.isPackaged) return;
-  if (platform.IS_MAC) { setTimeout(checkReleaseNotice, 8000); setInterval(checkReleaseNotice, 6 * 60 * 60 * 1000); return; }
+  if (platform.IS_MAC) {
+    const notice = () => { if (!config.load().offline) checkReleaseNotice(); };
+    setTimeout(notice, 8000); setInterval(notice, 6 * 60 * 60 * 1000);
+    return;
+  }
   let autoUpdater;
   try { ({ autoUpdater } = require('electron-updater')); } catch { return; }
-  autoUpdater.autoDownload = true;
+  // Builds are unsigned, so a release is trusted only because it came from the project's GitHub. Don't fetch and
+  // stage code silently: announce the version and let the user choose to download it, so an unexpected release is
+  // visible before it is installed. Offline mode (Settings) skips the check entirely.
+  autoUpdater.autoDownload = false;
+  autoUpdater.on('update-available', (info) => send('update:available', { version: info.version, url: `https://github.com/mirrorsedgepro-stack/Intergrate-Your-AI/releases/tag/v${info.version}`, download: true }));
   autoUpdater.on('update-downloaded', (info) => send('update:ready', info.version));
   autoUpdater.on('error', () => {});
-  const check = () => autoUpdater.checkForUpdates().catch(() => {});
+  const check = () => { if (!config.load().offline) autoUpdater.checkForUpdates().catch(() => {}); };
   setTimeout(check, 8000);
   setInterval(check, 6 * 60 * 60 * 1000);
+  ipcMain.on('update:download', () => autoUpdater.downloadUpdate().catch(() => {}));
   ipcMain.on('update:install', () => autoUpdater.quitAndInstall());
 }
 
@@ -221,17 +235,31 @@ app.whenReady().then(async () => {
   await Promise.all([platform.loadLoginShellPath(), addWslMachines().catch(() => {})]);
   createWindow();
   setupUpdates();
+  syncMcp();
 });
 app.on('second-instance', () => { if (win) { if (win.isMinimized()) win.restore(); win.focus(); } });
 app.on('window-all-closed', () => {
   for (const s of sessions.values()) { try { s.close(); } catch {} }
+  for (const x of tunnels.values()) x.t.stop();
+  stopMcp();
   for (const m of machines.values()) m.disconnect();
   app.quit();
 });
 
 // ---- IPC: config / app ----
-// The renderer never sees the (encrypted) Tailscale token.
-const publicConfig = () => { const c = { ...config.load() }; if (c.tailscale) c.tailscale = { ...c.tailscale, token: undefined }; return c; };
+// The renderer never sees the (encrypted) Tailscale token, nor any key passphrase someone put in config.json by hand.
+const publicConfig = () => {
+  const c = { ...config.load() };
+  if (c.tailscale) c.tailscale = { ...c.tailscale, token: undefined };
+  c.machines = (c.machines || []).map((m) => (m.passphrase ? { ...m, passphrase: undefined } : m));
+  return c;
+};
+// Passphrases are per-run secrets (asked in a modal, held in memory). One left in config.json is still honoured for
+// compatibility, but is kept out of the renderer and out of any config the renderer writes back.
+const withSecrets = (machines, prev) => (machines || []).map((m) => {
+  const p = (prev || []).find((x) => x.id === m.id);
+  return p && p.passphrase ? { ...m, passphrase: p.passphrase } : { ...m, passphrase: undefined };
+});
 ipcMain.handle('config:get', () => publicConfig());
 // A fresh renderer (first load or reload) owns no sessions: drop any left over. Remote tmux sessions survive.
 ipcMain.on('app:hello', () => {
@@ -240,11 +268,12 @@ ipcMain.on('app:hello', () => {
 });
 ipcMain.handle('config:save', (_e, cfg) => {
   const prev = config.load();
-  config.save({ ...cfg, knownHosts: prev.knownHosts, window: prev.window, tailscale: prev.tailscale });
+  config.save({ ...cfg, machines: withSecrets(cfg.machines, prev.machines), knownHosts: prev.knownHosts, window: prev.window, tailscale: prev.tailscale });
+  syncMcp();
   // Drop connections whose address changed so the next use reconnects with new settings.
   for (const [id, m] of machines) {
     const a = prev.machines.find((x) => x.id === id), b = cfg.machines.find((x) => x.id === id);
-    if (!b || !a || a.host !== b.host || a.user !== b.user || String(a.port) !== String(b.port) || a.keyPath !== b.keyPath) {
+    if (!b || !a || a.host !== b.host || a.user !== b.user || String(a.port) !== String(b.port) || a.keyPath !== b.keyPath || (a.jump || '') !== (b.jump || '')) {
       m.disconnect();
       machines.delete(id);
       send('machine:status', id, 'offline', null);
@@ -299,7 +328,13 @@ ipcMain.handle('machine:probe', safe((_e, id) => {
   const m = machineCfg(id);
   return m && m.type === 'wsl' ? local.wslProbe(m.distro) : getMachine(id).probe();
 }));
-ipcMain.handle('machine:stats', safe(async (_e, id) => ({ stats: await getMachine(id).stats() })));
+ipcMain.handle('machine:stats', safe(async (_e, id) => {
+  const m = machineCfg(id);
+  if (!m) throw new Error('Unknown machine');
+  const stats = m.type === 'local' ? await local.stats() : m.type === 'wsl' ? await local.wslStats(m.distro) : await getMachine(id).stats();
+  if (stats) lastStats.set(id, stats);
+  return { stats };
+}));
 ipcMain.handle('machine:dirs', safe((_e, id) => {
   const m = machineCfg(id);
   return m && m.type === 'wsl' ? local.wslDirs(m.distro) : getMachine(id).listDirs();
@@ -344,10 +379,13 @@ function tsToken() {
   if (!enc || !secureStorageOk()) return null;
   try { return safeStorage.decryptString(Buffer.from(enc, 'base64')); } catch { return null; }
 }
+// One client per saved credential, so an OAuth client's 1-hour access token is reused across calls.
+let tsClient = null;
 function tsApi() {
   const t = tsToken();
-  if (!t) throw new Error('Add a Tailscale API access token first');
-  return new tailscale.TailscaleApi(t);
+  if (!t) throw new Error('Add a Tailscale API access token or OAuth client first');
+  if (!tsClient || tsClient.raw !== t) tsClient = { raw: t, api: new tailscale.TailscaleApi(t) };
+  return tsClient.api;
 }
 const matchDevices = (devices, machines, self) => tailscale.matchDevices(devices, machines, self);
 const selfName = async () => { try { const l = await tailscale.localStatus(); return (l.self && l.self.dnsName) || ''; } catch { return ''; } };
@@ -358,12 +396,14 @@ let lastPlan = null;
 ipcMain.handle('ts:status', async () => ({
   local: await tailscale.localStatus(),
   hasToken: !!tsToken(),
+  tokenKind: ((c) => (c ? c.kind : null))(tailscale.parseCredential(tsToken() || '')),
   canEncrypt: secureStorageOk(),
 }));
 ipcMain.handle('ts:set-token', safe(async (_e, token) => {
   const t = String(token || '').trim();
-  if (!/^tskey-api-/.test(t)) throw new Error('That does not look like an API access token (it starts with tskey-api-)');
-  const devices = await new tailscale.TailscaleApi(t).devices(); // validates the token
+  const cred = tailscale.parseCredential(t);
+  if (!cred) throw new Error('That does not look like a Tailscale credential: paste an API access token (tskey-api-…) or an OAuth client secret (tskey-client-…, optionally as clientId:secret)');
+  const devices = await new tailscale.TailscaleApi(cred).devices(); // validates the credential (and, for OAuth, its scopes)
   if (!secureStorageOk()) throw new Error('Secure storage (Windows DPAPI, macOS Keychain or a Linux keyring such as gnome-keyring/KWallet) is unavailable; the token was not saved');
   const c = config.load();
   c.tailscale = { ...(c.tailscale || {}), token: safeStorage.encryptString(t).toString('base64') };
@@ -373,6 +413,7 @@ ipcMain.handle('ts:set-token', safe(async (_e, token) => {
 ipcMain.handle('ts:clear-token', () => {
   const c = config.load();
   if (c.tailscale) delete c.tailscale.token;
+  tsClient = null;
   config.save(c);
   return true;
 });
@@ -390,13 +431,13 @@ ipcMain.handle('ts:overview', safe(async (_e, machines) => {
 }));
 
 // Preview the policy + tag changes needed to share the machines (no changes made).
-ipcMain.handle('ts:plan', safe(async (_e, { machines, sshUsers, addGuest, removeGuest }) => {
+ipcMain.handle('ts:plan', safe(async (_e, { machines, sshUsers, addGuest, removeGuest, perGuestUsers }) => {
   const api = tsApi();
   const [{ policy, etag }, devices] = await Promise.all([api.getPolicy(), api.devices()]);
   let guests = tailscale.guestsIn(policy);
   if (addGuest) guests = [...guests, addGuest.toLowerCase()];
   if (removeGuest) guests = guests.filter((g) => g !== removeGuest.toLowerCase());
-  const plan = tailscale.planPolicy(policy, { guests, sshUsers });
+  const plan = tailscale.planPolicy(policy, { guests, sshUsers, perGuestUsers: !!perGuestUsers });
   const sparks = matchDevices(devices, machines, await selfName());
   const tagChanges = sparks.filter((s) => s.device && !s.device.tags.includes(tailscale.SPARK_TAG))
     .map((s) => ({ deviceId: s.device.id, hostname: s.hostname, device: s.device.name, tags: [...s.device.tags, tailscale.SPARK_TAG] }));
@@ -431,7 +472,65 @@ ipcMain.handle('ts:revoke', safe(async (_e, { userId, inviteId }) => {
   return {};
 }));
 ipcMain.handle('ts:encode-invite', (_e, data) => tailscale.encodeInvite(data));
-ipcMain.handle('ts:decode-invite', safe(async (_e, code) => tailscale.decodeInvite(code)));
+ipcMain.handle('ts:guest-user', (_e, email) => tailscale.guestUser(email));
+// Remember the sharing mode (per-guest accounts or shared accounts) next to the token.
+ipcMain.handle('ts:set-mode', (_e, { perGuestUsers }) => {
+  const c = config.load();
+  c.tailscale = { ...(c.tailscale || {}), perGuestUsers: !!perGuestUsers };
+  config.save(c);
+  return true;
+});
+ipcMain.handle('ts:decode-invite', safe(async (_e, code) => {
+  let local = null;
+  try { local = (await tailscale.localStatus()).tailnet || null; } catch { /* no local client: skip the check */ }
+  return tailscale.decodeInvite(code, local);
+}));
+
+// ---- IPC: workspace / preset export and import (a JSON file you can hand to a teammate) ----
+// The file carries workspaces, presets and a machine index (name/host) so sessions can be re-pointed at the
+// importer's own machines. No addresses are required to match: unmatched sessions are skipped, not guessed.
+ipcMain.handle('app:export-workspaces', safe(async () => {
+  const c = config.load();
+  const { filePath } = await dialog.showSaveDialog(win, { title: 'Export workspaces and presets', defaultPath: path.join(app.getPath('documents'), 'nexus-workspaces.json'), filters: [{ name: 'JSON', extensions: ['json'] }] });
+  if (!filePath) return { cancelled: true };
+  const data = {
+    nexus: 1, exportedAt: new Date().toISOString(),
+    presets: (c.presets || []).map(({ id, name, color, icon, cmd, only }) => ({ id, name, color, icon, cmd, only })),
+    workspaces: c.workspaces || [],
+    machines: (c.machines || []).map((m) => ({ id: m.id, name: m.name, type: m.type, host: m.host || '', tsHost: m.tsHost || '', hostname: m.hostname || '' })),
+  };
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+  return { path: filePath, workspaces: data.workspaces.length, presets: data.presets.length };
+}));
+ipcMain.handle('app:import-workspaces', safe(async () => {
+  const { filePaths } = await dialog.showOpenDialog(win, { title: 'Import workspaces and presets', filters: [{ name: 'JSON', extensions: ['json'] }], properties: ['openFile'] });
+  if (!filePaths || !filePaths.length) return { cancelled: true };
+  const raw = fs.readFileSync(filePaths[0], 'utf8');
+  if (raw.length > 4 * 1024 * 1024) throw new Error('That file is too large to be a Nexus export');
+  const data = JSON.parse(raw);
+  if (!data || data.nexus !== 1) throw new Error('Not a Nexus export file');
+  return { data: { presets: Array.isArray(data.presets) ? data.presets : [], workspaces: Array.isArray(data.workspaces) ? data.workspaces : [], machines: Array.isArray(data.machines) ? data.machines : [] } };
+}));
+
+// ---- IPC: port forwarding (ssh -L over the machine's connection) ----
+const tunnels = new Map(); // id -> { machineId, t: Tunnel }
+let nextTunnel = 1;
+const tunnelList = () => [...tunnels].map(([id, x]) => ({ id, machineId: x.machineId, ...x.t.info() }));
+ipcMain.handle('tunnel:open', safe(async (_e, { machineId, remoteHost, remotePort, localPort }) => {
+  const m = machineCfg(machineId);
+  if (!m || m.type !== 'ssh') throw new Error('Port forwarding needs an SSH machine');
+  const host = String(remoteHost || '127.0.0.1').trim();
+  if (!/^[\w.-]+$/.test(host)) throw new Error('Remote host must be a hostname or IP');
+  const mach = getMachine(machineId);
+  await mach.connect();
+  const t = new Tunnel(mach, { remoteHost: host, remotePort, localPort });
+  await t.start();
+  const id = `t${nextTunnel++}`;
+  tunnels.set(id, { machineId, t }); // kept across reconnects: new connections use whatever conn the machine has
+  return { id, ...t.info() };
+}));
+ipcMain.handle('tunnel:close', (_e, id) => { const x = tunnels.get(id); if (x) { x.t.stop(); tunnels.delete(id); } return true; });
+ipcMain.handle('tunnel:list', () => tunnelList());
 
 // ---- IPC: team chat + presence (stored on the hub machine, over the existing SSH connection) ----
 let hub = null; // { machineId, ch: CollabHub }
@@ -458,10 +557,65 @@ ipcMain.handle('collab:post', safe(async (_e, { from, text, kind }) => {
   await hub.ch.post(m);
   return { id: m.id };
 }));
+// Team presets: one JSON file on the hub so everyone launches the same commands. Untrusted content: presets are
+// commands, so the importer reviews and confirms them in the renderer before they become theirs.
+ipcMain.handle('collab:presets-get', safe(async () => {
+  if (!hub) throw new Error('Team chat is not connected');
+  const r = await hub.ch.machine.exec('cat ~/.nexus/collab/presets.json 2>/dev/null || echo "[]"');
+  const list = JSON.parse(r.stdout || '[]');
+  return { presets: Array.isArray(list) ? list.slice(0, 50) : [] };
+}));
+ipcMain.handle('collab:presets-put', safe(async (_e, presets) => {
+  if (!hub) throw new Error('Team chat is not connected');
+  const clean = (Array.isArray(presets) ? presets : []).slice(0, 50).map(({ id, name, color, icon, cmd, only }) => ({ id, name, color, icon, cmd, only }));
+  const r = await hub.ch.machine.exec('mkdir -p ~/.nexus/collab && cat > ~/.nexus/collab/presets.json.tmp && mv -f ~/.nexus/collab/presets.json.tmp ~/.nexus/collab/presets.json', JSON.stringify(clean, null, 2));
+  if (r.code) throw new Error(r.stderr || 'could not publish');
+  return { count: clean.length };
+}));
 ipcMain.handle('collab:heartbeat', safe(async (_e, presence) => {
   if (!hub) return { presence: [] };
   return { presence: await hub.ch.heartbeat(collab.makePresence(presence)) };
 }));
+
+// ---- MCP server (opt-in): local agents orchestrate Nexus ----
+let mcp = null;
+const lastStats = new Map(); // machineId -> stats (from machine:stats polls), for list_machines
+const launchWaits = new Map(); // reqId -> resolve, for launches that go through the renderer
+let launchReq = 0;
+async function startMcp() {
+  if (mcp) return;
+  const srv = new McpServer({
+    version: app.getVersion(),
+    listMachines: async () => {
+      const c = config.load();
+      return c.machines.map((m) => {
+        const mach = machines.get(m.id);
+        return { id: m.id, name: m.name, type: m.type, os: m.os, host: m.host || undefined, status: m.type === 'local' ? 'online' : (mach ? mach.status : 'offline'), stats: lastStats.get(m.id) || null };
+      });
+    },
+    listSessions: async () => [...sessions].map(([id, s]) => ({ id, machineId: s.machineId, preset: s.presetId, cwd: s.cwd, tmux: s.tmuxName || null, lastLine: require('./lib/mcp').plain(s.recent || '').trim().split('\n').pop() || '' })),
+    launch: ({ machine, preset, cwd }) => new Promise((resolve, reject) => {
+      const c = config.load();
+      const m = c.machines.find((x) => x.id === machine || x.name.toLowerCase() === machine.toLowerCase());
+      if (!m) return reject(new Error(`No machine "${machine}"`));
+      if (!c.presets.some((p) => p.id === preset)) return reject(new Error(`No preset "${preset}"`));
+      if (!win || win.isDestroyed()) return reject(new Error('Nexus window is not open'));
+      const reqId = ++launchReq;
+      const t = setTimeout(() => { launchWaits.delete(reqId); reject(new Error('Nexus did not start the session (is a dialog open?)')); }, 30000);
+      launchWaits.set(reqId, (r) => { clearTimeout(t); launchWaits.delete(reqId); r.error ? reject(new Error(r.error)) : resolve(r); });
+      send('mcp:launch', { reqId, machineId: m.id, presetId: preset, cwd });
+    }),
+    send: async (id, text) => { const s = sessions.get(id); if (!s) throw new Error(`No session ${id}`); s.write(text); },
+    readOutput: async (id) => { const s = sessions.get(id); if (!s) throw new Error(`No session ${id}`); return s.recent || ''; },
+    close: async (id, kill) => { const s = sessions.get(id); if (!s) throw new Error(`No session ${id}`); send('mcp:close', { id, kill }); },
+  });
+  await srv.start();
+  mcp = srv;
+}
+function stopMcp() { if (mcp) { mcp.stop(); mcp = null; } }
+function syncMcp() { const on = !!(config.load().mcp || {}).enabled; if (on && !mcp) startMcp().catch(() => {}); else if (!on && mcp) stopMcp(); }
+ipcMain.on('mcp:launched', (_e, r) => { const fn = launchWaits.get(r && r.reqId); if (fn) fn(r); });
+ipcMain.handle('mcp:status', () => ({ running: !!mcp, port: mcp ? mcp.port : null, bridge: path.join(SCRIPTS_DIR, 'nexus-mcp.js') }));
 
 // ---- IPC: sessions ----
 ipcMain.handle('session:create', async (_e, spec) => {
@@ -489,7 +643,7 @@ ipcMain.handle('session:create', async (_e, spec) => {
       if (cwd && m.type !== 'wsl' && !fs.existsSync(cwd)) cwd = undefined;
       const p = local.spawn({ cmd, cols, rows, script, cwd, wsl: m.type === 'wsl' ? m.distro : null });
       sessions.set(id, {
-        machineId: m.id,
+        machineId: m.id, presetId: preset.id, cwd: spec.cwd || null,
         write: (d) => p.write(d),
         resize: (c, r) => { try { p.resize(c, r); } catch {} },
         close: () => { try { p.kill(); } catch {} },
@@ -506,11 +660,11 @@ ipcMain.handle('session:create', async (_e, spec) => {
 
     const mach = getMachine(m.id);
     const tmuxName = spec.raw ? null : (spec.attach || `nx-${preset.id}-${Date.now().toString(36).slice(-4)}${Math.random().toString(36).slice(2, 4)}`);
-    const stream = await mach.open({ tmuxName, cmd, cols, rows, cwd: spec.cwd, readOnly: !!spec.readOnly });
+    const stream = await mach.open({ tmuxName, cmd, cols, rows, cwd: spec.cwd, readOnly: !!spec.readOnly, record: !!(cfg.appearance || {}).recordSessions });
     const dec = new StringDecoder('utf8');
     let exitCode = null;
     sessions.set(id, {
-      machineId: m.id,
+      machineId: m.id, presetId: preset.id, cwd: spec.cwd || null,
       tmuxName,
       write: (d) => stream.write(d),
       resize: (c, r) => { try { stream.setWindow(r, c, 0, 0); } catch {} },
@@ -540,6 +694,11 @@ ipcMain.handle('session:close', async (_e, id, opts = {}) => {
   s.close();
   if (opts.kill && s.tmuxName) await getMachine(s.machineId).killTmux(s.tmuxName);
   return true;
+});
+ipcMain.handle('session:agent-status', async (_e, id) => {
+  const s = sessions.get(id);
+  if (!s || !s.tmuxName) return null;
+  try { return await getMachine(s.machineId).agentStatus(s.tmuxName); } catch { return null; }
 });
 ipcMain.handle('session:cwd', async (_e, id) => {
   const s = sessions.get(id);

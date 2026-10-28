@@ -47,3 +47,18 @@ test('presence presets from others are reduced to plain ids', () => {
   const p = makePresence({ client: 'x', sessions: [{ preset: '__proto__' }, { preset: '<img src=x>' }, { preset: 'claude' }] });
   assert.deepStrictEqual(p.sessions.map((s) => s.preset), ['shell', 'shell', 'claude']);
 });
+
+test('claims: /claim parsing, presence carries them, expired or own claims are not conflicts', () => {
+  const { parseClaim, claimsOn } = require('../renderer/util');
+  const { makePresence } = require('../lib/collab');
+  const now = new Date('2026-10-28T10:00:00').getTime();
+  assert.deepStrictEqual(parseClaim('/claim gpu-box 1h30m fine-tuning', now), { host: 'gpu-box', until: now + 90 * 60000, note: 'fine-tuning' });
+  assert.strictEqual(parseClaim('/claim gpu-box 15:00', now).until, new Date('2026-10-28T15:00:00').getTime());
+  assert.strictEqual(parseClaim('/claim gpu-box 09:00', now).until, new Date('2026-10-29T09:00:00').getTime(), 'a past clock time means tomorrow');
+  assert.strictEqual(parseClaim('/claim gpu-box soon', now), null);
+  const p = makePresence({ client: 'a', name: 'Sam', claims: [{ host: 'gpu-box', until: now + 1000, note: 'x' }, { host: '', until: now + 1000 }] });
+  assert.strictEqual(p.claims.length, 1);
+  const presence = [p, makePresence({ client: 'b', name: 'Me', claims: [{ host: 'gpu-box', until: now + 1000 }] })];
+  assert.deepStrictEqual(claimsOn(presence, 'gpu-box', 'b', now).map((c) => c.person), ['Sam']);
+  assert.deepStrictEqual(claimsOn(presence, 'gpu-box', 'b', now + 2000), [], 'expired');
+});

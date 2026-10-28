@@ -1,7 +1,7 @@
 'use strict';
 (() => {
   const api = window.nexus;
-  const { fuzzy, mentions, isExeTitle } = window.NexusUtil;
+  const { fuzzy, mentions, isExeTitle, parseClaim, claimsOn } = window.NexusUtil;
   const IS_MAC = api.platform === 'darwin';
   const IS_WIN = api.platform === 'win32';
   document.body.classList.add(`platform-${api.platform}`);
@@ -46,6 +46,7 @@
     send: '<svg viewBox="0 0 24 24"><path d="M4 20l16-8L4 4v6l10 2-10 2z"/></svg>',
     gear: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg>',
     key: '<svg viewBox="0 0 24 24"><circle cx="7.5" cy="15.5" r="4"/><path d="M10.5 12.5L20 3M16 7l3 3M14 9l2 2"/></svg>',
+    clock: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
     box: '<svg viewBox="0 0 24 24"><path d="M21 8l-9-5-9 5 9 5 9-5zM3 8v8l9 5 9-5V8M12 13v8"/></svg>',
     layout: '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M12 3v18M3 12h9"/></svg>',
     folder: '<svg viewBox="0 0 24 24"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2.5h7.5A2.5 2.5 0 0 1 21 10v7.5a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z"/></svg>',
@@ -59,6 +60,8 @@
   const S = {
     cfg: null,
     mstate: {},           // machineId -> { status, error, tools, detached, hostname }
+    tunnels: [],          // active port forwards: { id, machineId, localPort, remoteHost, remotePort }
+    queue: [],            // launches waiting for a machine to be free: { id, machineId, presetId, extra, why }
     sessions: new Map(),  // local id -> session
     byPid: new Map(),     // main-process id -> session
     early: new Map(),     // data that arrived before we mapped the pid
@@ -218,7 +221,19 @@
       markDone(s, true, body);
       renderChrome();
     };
-    term.onBell(() => signal());
+    // A bell from a remote agent session: ask what the hook recorded (needs permission? finished with what?) so the
+    // notification and the pane header say why it stopped, not just that it did.
+    term.onBell(async () => {
+      if (!s.tmuxName || !isAgent(s) || !s.pid) return signal();
+      let st = null;
+      try { st = await api.agentStatus(s.pid); } catch { /* no hook status */ }
+      if (st && now() - st.ts < 60000) {
+        s.agent = st;
+        const why = st.event === 'Notification' ? (st.message || 'needs your input') : (st.summary ? `Finished: ${st.summary}` : 'Finished');
+        signal(why);
+        renderChrome();
+      } else signal();
+    });
     term.parser.registerOscHandler(9, (data) => { if (!/^\d+;/.test(data)) signal(data); return true; });
     term.parser.registerOscHandler(777, (data) => { const [kind, , body] = data.split(';'); if (kind === 'notify') signal(body); return true; });
     // OSC 52 clipboard writes: full-screen apps (Claude Code) copy their own mouse selections this way, through
@@ -328,6 +343,7 @@
     if (m.type === 'ssh' && !m.host) { openSettings(); toast(`Add the address of ${m.name} first.`); return null; }
     if (isMissing(m, presetById(presetId)) && !extra.raw && !extra.script) toast(installHint(m, presetId), 'warn');
     if (!extra.raw && !extra.script && !extra.attach && !(await checkFolderConflict(machineId, presetId, extra.cwd))) return null;
+    if (!extra.raw && !extra.script && !extra.attach && !extra.queued && !(await checkClaim(machineId, presetId, extra))) return null;
     const s = makeSession(machineId, presetId, { announce: !extra.raw && !extra.script && !extra.attach, ...extra });
     show(s.id);
     await frame();
@@ -461,7 +477,7 @@
     }
   }
   function clearDone(s) {
-    if (s.activity === 'done') { s.activity = 'idle'; renderChrome(); }
+    if (s.activity === 'done') { s.activity = 'idle'; s.agent = null; renderChrome(); }
   }
   setInterval(() => {
     const t = now();
@@ -716,6 +732,7 @@
         + `<span class="chip" style="--mc:${m.color}">${esc(m.name)}</span>`
         + (s.cwd && s.cwd !== '~' ? `<span class="chip ghost" title="${esc(s.cwd)}">${I.folder}${esc(shortPath(s.cwd))}</span>` : '')
         + (s.readOnly ? '<span class="chip" style="--mc:#bb9af7">read-only</span>' : '')
+        + (s.agent && s.activity === 'done' ? `<span class="chip ${s.agent.event === 'Notification' ? 'ask' : ''}" title="${esc(s.agent.event === 'Notification' ? s.agent.message : s.agent.summary)}">${s.agent.event === 'Notification' ? '⚠ ' + esc((s.agent.message || 'needs input').slice(0, 60)) : '✓ ' + esc((s.agent.summary || 'finished').slice(0, 60))}</span>` : '')
         + stateChip
         + `<span class="p-sub" title="${esc(s.tmuxName ? `tmux session ${s.tmuxName}` : '')}">${esc(s.title)}</span>`
         + (isAgent(s) ? `<button class="icon-btn" data-pact="reply" title="Send last reply to another agent (Ctrl+Shift+S)">${I.send}</button>` : '')
@@ -760,6 +777,17 @@
     $('#tabs .tab.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }
 
+  // "Claimed by Sam until 15:00 · fine-tuning" (others' claims and your own) and anything queued for this machine.
+  function claimHtml(m) {
+    if (m.type !== 'ssh') return '';
+    const parts = [];
+    const mine = myClaimOn(m.id);
+    if (mine) parts.push(`<div class="m-claim mine" title="/release ${esc(m.name)} to give it up">${I.key}<span>Yours until ${fmtTime(mine.until)}${mine.note ? ` · ${esc(mine.note)}` : ''}</span></div>`);
+    for (const c of claimedBy(m.id)) parts.push(`<div class="m-claim">${I.key}<span>${esc(c.person)} until ${fmtTime(c.until)}${c.note ? ` · ${esc(c.note)}` : ''}</span></div>`);
+    const q = S.queue.filter((x) => x.machineId === m.id);
+    if (q.length) parts.push(`<div class="m-claim queued">${I.clock}<span>${q.length} launch${q.length > 1 ? 'es' : ''} queued until free</span></div>`);
+    return parts.join('');
+  }
   function machineCard(m) {
     const st = S.mstate[m.id] || {};
     const status = m.type === 'local' ? 'online' : (st.status || 'offline');
@@ -791,13 +819,14 @@
     return `<div class="machine" style="--c:${m.color}" data-machine="${m.id}">
       <div class="m-head">
         <div class="m-icon">${mIcon(m)}</div>
-        <div class="m-meta"><div class="m-name">${esc(m.name)} <span class="dot ${status}" title="${status}"></span></div><div class="m-sub">${st.status === 'online' && st.route === 'tailscale' ? '<span class="route ts" title="Connected through Tailscale">TS</span>' : ''}${esc(sub)}</div></div>
+        <div class="m-meta"><div class="m-name">${esc(m.name)} <span class="dot ${status}" title="${status}"></span></div><div class="m-sub">${st.status === 'online' && st.route === 'tailscale' ? '<span class="route ts" title="Connected through Tailscale">TS</span>' : st.status === 'online' && st.route === 'jump' ? '<span class="route ts" title="Connected through a jump host">JUMP</span>' : ''}${esc(sub)}</div></div>
         <div class="m-actions">
           ${m.type === 'ssh' ? `<button class="icon-btn" data-act="refresh" data-m="${m.id}" title="${status === 'online' ? 'Refresh' : 'Connect'}">${status === 'online' ? I.refresh : I.plug}</button>` : ''}
           <button class="icon-btn" data-act="mmenu" data-m="${m.id}" title="More">${I.more}</button>
         </div>
       </div>
       ${status === 'error' && st.error ? `<div class="m-error">${esc(st.error)}<br><button data-act="settings">Open settings</button></div>` : ''}
+      ${claimHtml(m)}
       ${statsHtml(m)}
       <div class="launchers">${launchers}</div>
       ${items ? `<div class="s-list">${items}</div>` : ''}
@@ -818,11 +847,14 @@
     const hot = p >= 85 ? 'hot' : p >= 60 ? 'warm' : '';
     return `<div class="meter ${hot}" title="${esc(title)}"><span class="ml">${label}</span><span class="mv">${value}</span><span class="mb"><i style="width:${p}%"></i></span></div>`;
   }
+  // Bytes/second -> "12.3 MB/s" (short, for a meter value).
+  const bps = (v) => (v == null ? '-' : v >= 1024 ** 2 ? `${(v / 1024 ** 2).toFixed(v >= 10 * 1024 ** 2 ? 0 : 1)} MB/s` : v >= 1024 ? `${Math.round(v / 1024)} kB/s` : `${Math.round(v)} B/s`);
+  // Local and WSL machines have stats too (this computer / the distro), without the "online" gate SSH machines need.
+  const statsLive = (m, st) => m.type !== 'ssh' || st.status === 'online';
   function statsHtml(m) {
-    if (m.type !== 'ssh') return '';
     const st = S.mstate[m.id] || {};
     const x = st.stats;
-    if (!x || st.status !== 'online') return '<div class="m-stats" data-stats="' + m.id + '"></div>';
+    if (!x || !statsLive(m, st)) return '<div class="m-stats" data-stats="' + m.id + '"></div>';
     const parts = [];
     if (x.gpu && x.gpu.error) {
       parts.push(`<div class="meter gpu-err" title="${esc(x.gpu.error)}"><span class="ml">GPU</span><span class="mv">driver unavailable</span><span class="mb"><i style="width:0"></i></span></div>`);
@@ -835,19 +867,31 @@
       parts.push(meter('RAM', (used / x.memTotal) * 100, `${gb(used)}/${gb(x.memTotal)} GB`, 'System memory (shared with the GPU on unified-memory machines)'));
     }
     if (x.load != null && x.cpus) parts.push(meter('CPU', (x.load / x.cpus) * 100, `${x.load.toFixed(1)} / ${x.cpus}`, '1-minute load average / cores'));
+    if (x.disk && x.disk.total) {
+      // Used vs. total of the filesystem the home folder lives on; the bar follows what's left, which is what runs out.
+      const pct = ((x.disk.total - (x.disk.avail || 0)) / x.disk.total) * 100;
+      parts.push(meter('DISK', pct, `${gb(x.disk.avail || 0)} GB free of ${gb(x.disk.total)}`, `Filesystem of the home folder (${x.disk.mount || '/'}): ${gb(x.disk.used || 0)} GB used`));
+    }
+    if (x.net) {
+      // Throughput since the previous sample (5 s): the bar is log-scaled so 100 kB/s and 1 GB/s are both visible.
+      const tot = (x.net.rxBps || 0) + (x.net.txBps || 0);
+      const pct = tot > 0 ? Math.min(100, (Math.log10(tot) - 3) / 6 * 100) : 0; // 1 kB/s -> 0%, 1 GB/s -> 100%
+      parts.push(meter('NET', Math.max(0, pct), `↓${bps(x.net.rxBps)} ↑${bps(x.net.txBps)}`, `Network in / out (all interfaces); total ${gb(x.net.rx)} GB received, ${gb(x.net.tx)} GB sent since boot`)
+        .replace('class="meter', 'class="meter net'));
+    }
     return `<div class="m-stats" data-stats="${m.id}">${parts.join('')}</div>`;
   }
   async function pollStats() {
     for (const m of S.cfg.machines) {
-      if (m.type !== 'ssh' || (S.mstate[m.id] || {}).status !== 'online') continue;
+      if (!statsLive(m, S.mstate[m.id] || {})) continue;
       const r = await api.stats(m.id);
       if (!r.ok || !r.stats) continue;
-      S.mstate[m.id].stats = r.stats;
+      (S.mstate[m.id] = S.mstate[m.id] || {}).stats = r.stats;
       const el = document.querySelector(`[data-stats="${m.id}"]`);
       if (el) el.outerHTML = statsHtml(m);
     }
   }
-  setInterval(pollStats, 5000);
+  setInterval(async () => { await pollStats(); await runQueue(); }, 5000);
 
   // ---------------------------------------------------------------- session persistence + workspaces
   const persistable = (s) => !s.spec.raw && !s.spec.script;
@@ -920,9 +964,85 @@
           run: () => openLayout(w),
         })),
         { group: 'Manage', icon: I.save, label: 'Save current layout as workspace…', run: saveWorkspace },
+        { group: 'Manage', icon: I.send, label: 'Export workspaces and presets to a file…', run: exportWorkspaces },
+        { group: 'Manage', icon: I.folder, label: 'Import workspaces and presets from a file…', run: importWorkspaces },
         ...ws.map((w) => ({ group: 'Manage', icon: I.trash, label: `Delete workspace "${w.name}"`, run: () => deleteWorkspace(w.name) })),
       ],
     });
+  }
+
+  // ---- export / import (hand your layouts and launch commands to a teammate) ----
+  async function exportWorkspaces() {
+    const r = await api.exportWorkspaces();
+    if (!r.ok) { toast(r.error, 'bad'); return; }
+    if (r.cancelled) return;
+    toast(`Exported ${r.workspaces} workspace${r.workspaces === 1 ? '' : 's'} and ${r.presets} presets`, 'ok');
+  }
+  // Map a machine from the export onto one of ours: same id, else same address, else same name. Null = skip.
+  function matchMachine(x) {
+    const ms = S.cfg.machines;
+    return ms.find((m) => m.id === x.id && (m.type === x.type || !x.type))
+      || ms.find((m) => x.host && (m.host === x.host || m.tsHost === x.host || m.tsHost === x.tsHost))
+      || ms.find((m) => x.name && m.name === x.name)
+      || (x.type === 'local' ? ms.find((m) => m.type === 'local') : null)
+      || null;
+  }
+  async function importWorkspaces() {
+    const r = await api.importWorkspaces();
+    if (!r.ok) { toast(r.error, 'bad'); return; }
+    if (r.cancelled) return;
+    const { presets, workspaces, machines } = r.data;
+    const mapId = {};
+    for (const x of machines) { const m = matchMachine(x); if (m) mapId[x.id] = m.id; }
+    const newPresets = presets.filter((p) => p && /^[a-z0-9-]{1,24}$/.test(String(p.id)) && !S.cfg.presets.some((q) => q.id === p.id));
+    const ws = [];
+    for (const w of workspaces) {
+      if (!w || !w.name || !Array.isArray(w.sessions)) continue;
+      const sessions = w.sessions.map((x) => (mapId[x.machineId] ? { ...x, machineId: mapId[x.machineId] } : null));
+      const kept = sessions.filter(Boolean);
+      if (!kept.length) continue;
+      ws.push({ ...w, name: String(w.name).slice(0, 60), sessions: kept, panes: (w.panes || []).map((i) => kept.indexOf(sessions[i])) });
+    }
+    if (!ws.length && !newPresets.length) { toast('Nothing in that file matches your machines, and it has no new presets', 'warn'); return; }
+    // Presets are commands that will run on your machines: show them before adding.
+    const ok = await choose({
+      title: 'Import?',
+      desc: `${ws.length} workspace${ws.length === 1 ? '' : 's'} (${ws.map((w) => w.name).join(', ') || 'none'})`
+        + (newPresets.length ? `, and ${newPresets.length} new preset${newPresets.length === 1 ? '' : 's'}: ${newPresets.map((p) => `${p.name} = ${Object.values(p.cmd || {}).join(' | ') || '(shell)'}`).join('; ')}. Presets are commands that run on your machines: only import ones you understand.` : '. No new presets.'),
+      options: [{ label: 'Cancel', value: false, ghost: true }, { label: 'Import', value: true, primary: true }],
+    });
+    if (!ok) return;
+    S.cfg.workspaces = [...(S.cfg.workspaces || []).filter((w) => !ws.some((x) => x.name === w.name)), ...ws];
+    await api.patchConfig({ workspaces: S.cfg.workspaces });
+    if (newPresets.length) {
+      S.cfg.presets = [...S.cfg.presets, ...newPresets.map(({ id, name, color, icon, cmd, only }) => ({ id: String(id), name: String(name || id).slice(0, 40), color: /^#[0-9a-f]{6}$/i.test(color) ? color : '#9aa3ba', icon: String(icon || '').slice(0, 24), cmd: Object.fromEntries(Object.entries(cmd || {}).filter(([k]) => ['windows', 'linux', 'mac'].includes(k)).map(([k, v]) => [k, String(v)])), ...(only ? { only } : {}) }))];
+      S.cfg = await api.saveConfig(S.cfg);
+    }
+    renderAll();
+    toast(`Imported ${ws.length} workspace${ws.length === 1 ? '' : 's'}${newPresets.length ? ` and ${newPresets.length} presets` : ''}`, 'ok');
+  }
+  // Team presets live on the chat hub (~/.nexus/collab/presets.json) so the whole team launches the same commands.
+  async function publishPresets() {
+    const r = await api.collabPresetsPut(S.cfg.presets);
+    if (!r.ok) { toast(r.error, 'bad'); return; }
+    toast(`Published ${r.count} presets to the team`, 'ok');
+    postTeam('published their launch presets (Ctrl+Shift+P → Import team presets)', 'activity');
+  }
+  async function importTeamPresets() {
+    const r = await api.collabPresetsGet();
+    if (!r.ok) { toast(r.error, 'bad'); return; }
+    const fresh = r.presets.filter((p) => p && /^[a-z0-9-]{1,24}$/.test(String(p.id)) && !S.cfg.presets.some((q) => q.id === p.id));
+    if (!fresh.length) { toast('No team presets you don\'t already have', 'ok'); return; }
+    const ok = await choose({
+      title: 'Import team presets?',
+      desc: `New: ${fresh.map((p) => `${p.name} = ${Object.values(p.cmd || {}).join(' | ') || '(shell)'}`).join('; ')}. Anyone who can write to the hub machine could have put these here; they are commands that will run on your machines.`,
+      options: [{ label: 'Cancel', value: false, ghost: true }, { label: 'Import', value: true, primary: true }],
+    });
+    if (!ok) return;
+    S.cfg.presets = [...S.cfg.presets, ...fresh.map(({ id, name, color, icon, cmd, only }) => ({ id: String(id), name: String(name || id).slice(0, 40), color: /^#[0-9a-f]{6}$/i.test(color) ? color : '#9aa3ba', icon: String(icon || '').slice(0, 24), cmd: Object.fromEntries(Object.entries(cmd || {}).filter(([k]) => ['windows', 'linux', 'mac'].includes(k)).map(([k, v]) => [k, String(v)])), ...(only ? { only } : {}) }))];
+    S.cfg = await api.saveConfig(S.cfg);
+    renderAll();
+    toast(`Imported ${fresh.length} team preset${fresh.length === 1 ? '' : 's'}`, 'ok');
   }
 
   // ---------------------------------------------------------------- folder picker
@@ -1007,8 +1127,24 @@
     api.answerHost(id, ok === true);
   });
 
-  api.onUpdateAvailable(({ version, url }) => {
-    toast(`Nexus ${version} is available.`, 'ok', 60000, { label: 'Download', run: () => window.open(url) });
+  // An MCP client (Claude Code on this PC) asked Nexus to start or close a session.
+  api.onMcpLaunch(async ({ reqId, machineId, presetId, cwd }) => {
+    try {
+      const s = await launch(machineId, presetId, { cwd: cwd || undefined });
+      if (!s) return api.mcpLaunched({ reqId, error: 'Launch was cancelled in Nexus' });
+      const until = now() + 20000;
+      while (s.status === 'starting' && now() < until) await new Promise((r) => setTimeout(r, 200));
+      if (!s.pid) return api.mcpLaunched({ reqId, error: 'The session did not start' });
+      toast(`An MCP client started ${presetById(presetId).name} on ${machineById(machineId).name}`, 'ok', 4000);
+      api.mcpLaunched({ reqId, id: s.pid, name: s.name, machineId, preset: presetId, cwd: s.cwd || null });
+    } catch (err) { api.mcpLaunched({ reqId, error: err.message }); }
+  });
+  api.onMcpClose(({ id, kill }) => { const s = S.byPid.get(id); if (s) closeSession(s.id, { kill: !!kill }); });
+
+  api.onUpdateAvailable(({ version, url, download }) => {
+    // Windows/Linux: the updater can fetch it (after you say so). macOS: open the release page.
+    const run = download ? () => { api.downloadUpdate(); toast(`Downloading Nexus ${version}…`, 'ok', 4000); } : () => window.open(url);
+    toast(`Nexus ${version} is available.`, 'ok', 60000, { label: download ? 'Download and install' : 'Download', run });
   });
   api.onUpdateReady((version) => {
     toast(`Nexus ${version} is ready to install.`, 'ok', 60000, { label: 'Restart now', run: () => api.installUpdate() });
@@ -1151,10 +1287,35 @@
       items.push({ label: 'Enable Claude alerts', icon: I.bell, run: () => enableAlerts(m.id) });
       items.push({ label: 'Join Tailscale (sudo tailscale up --ssh)…', icon: I.plug, run: () => launch(m.id, 'shell', { raw: true, cmd: 'sudo tailscale up --ssh && tailscale status | head -5', name: `Tailscale → ${m.name}` }) });
       items.push({ label: 'Share over Tailscale…', icon: I.send, run: openShare });
+      items.push('sep', { header: 'Port forwarding' });
+      for (const t of S.tunnels.filter((t) => t.machineId === m.id)) {
+        items.push({ label: `Open localhost:${t.localPort} → ${t.remoteHost === '127.0.0.1' ? '' : t.remoteHost + ':'}${t.remotePort}`, icon: I.plug, run: () => window.open(`http://localhost:${t.localPort}/`) });
+        items.push({ label: `Stop forwarding localhost:${t.localPort}`, icon: I.x, run: () => closeTunnel(t.id) });
+      }
+      items.push({ label: 'Forward a port…', icon: I.plug, run: () => forwardPort(m.id) });
     }
     items.push('sep', { label: 'Machine settings…', icon: I.gear, run: openSettings });
     showMenu(x, y, items);
   }
+
+  // ---- port forwarding (ssh -L over the machine's connection): a remote web UI as http://localhost:<port> ----
+  async function forwardPort(machineId) {
+    const m = machineById(machineId);
+    const spec = await promptText({
+      title: `Forward a port from ${m.name}`, label: 'Remote port (or host:port as seen from that machine)', placeholder: '8888, or 127.0.0.1:18789, or gpu-box2:6006',
+      desc: 'The service becomes http://localhost:<port> on this computer, over the SSH connection. Only this computer can use it. The same local port is tried first; otherwise a free one is picked.',
+    });
+    if (!spec) return;
+    const mm = /^(?:([\w.-]+):)?(\d{1,5})$/.exec(spec.trim());
+    if (!mm) { toast('Enter a port like 8888 or host:port', 'warn'); return; }
+    let r = await api.tunnelOpen({ machineId, remoteHost: mm[1] || '127.0.0.1', remotePort: Number(mm[2]), localPort: Number(mm[2]) });
+    if (!r.ok && /already in use/.test(r.error)) r = await api.tunnelOpen({ machineId, remoteHost: mm[1] || '127.0.0.1', remotePort: Number(mm[2]), localPort: 0 });
+    if (!r.ok) { toast(`Couldn't forward: ${r.error}`, 'bad'); return; }
+    await refreshTunnels();
+    toast(`localhost:${r.localPort} → ${m.name}:${r.remotePort}`, 'ok', 15000, { label: 'Open in browser', run: () => window.open(`http://localhost:${r.localPort}/`) });
+  }
+  async function closeTunnel(id) { await api.tunnelClose(id); await refreshTunnels(); toast('Port forwarding stopped'); }
+  async function refreshTunnels() { try { S.tunnels = await api.tunnelList(); } catch { S.tunnels = []; } }
 
   async function setupKey(machineId) {
     const m = machineById(machineId);
@@ -1171,9 +1332,18 @@
 
   async function bootstrap(machineId) {
     const m = machineById(machineId);
+    const offline = !!S.cfg.offline;
+    const ok = await choose({
+      title: `Install tools on ${m.name}?`,
+      desc: offline
+        ? `Offline mode is on: the script only installs from ~/.nexus/offline/ on ${m.name} (tmux via the package manager, claude/agy/openclaw from installers you copied there) and never reaches the internet.`
+        : `This runs the vendors' install scripts on ${m.name} (curl … | bash from claude.ai, antigravity.google and openclaw.ai) and may ask for your sudo password. Only continue if ${m.name} is allowed to reach the internet and you trust those sources.`,
+      options: [{ label: 'Cancel', value: false, ghost: true }, { label: 'Install', value: true, primary: true }],
+    });
+    if (!ok) return;
     const r = await api.uploadBootstrap(machineId);
     if (!r.ok) { toast(`Can't reach ${m.name}: ${r.error}`, 'bad'); return; }
-    await launch(machineId, 'shell', { raw: true, cmd: 'bash ~/.nexus/bootstrap.sh', name: 'Install tools' });
+    await launch(machineId, 'shell', { raw: true, cmd: `${offline ? 'NEXUS_OFFLINE=1 ' : ''}bash ~/.nexus/bootstrap.sh`, name: 'Install tools' });
   }
 
   // ---------------------------------------------------------------- copy / paste / keys
@@ -1418,6 +1588,11 @@
     cmd('Share machines over Tailscale…', openShare, '', I.send);
     cmd('Team chat', () => openTeam(), 'Ctrl+Shift+M', I.send);
     cmd('Save layout as workspace…', saveWorkspace, '', I.save);
+    cmd('Queue: launches waiting for a free machine…', openQueue, '', I.layout);
+    cmd('Export workspaces and presets…', exportWorkspaces, '', I.send);
+    cmd('Import workspaces and presets…', importWorkspaces, '', I.folder);
+    cmd('Publish my presets to the team', publishPresets, '', I.send);
+    cmd('Import team presets…', importTeamPresets, '', I.folder);
     if (focused()) cmd(`Send last reply from ${focused().name} to…`, () => sendLastReply(focused()), 'Ctrl+Shift+S', I.send);
     cmd('Settings', openSettings, 'Ctrl+,', I.gear);
     for (const m of S.cfg.machines.filter((x) => x.type === 'ssh')) {
@@ -1578,7 +1753,8 @@
         <div class="field c3"><label>Host / IP</label><input class="mono" data-f="host" value="${esc(m.host)}" placeholder="192.168.1.50 or linuxbox.local"></div>
         <div class="field c1"><label>Port</label><input class="mono" type="number" data-f="port" value="${esc(m.port || 22)}"></div>
         <div class="field c6"><label>Tailscale address (optional; used when the LAN address can't be reached. Filled in automatically by Share)</label><input class="mono" data-f="tsHost" value="${esc(m.tsHost)}" placeholder="spark1.tail1234.ts.net"></div>
-        <div class="field c6"><label>Private key (optional; default tries ~/.ssh/id_ed25519, id_ecdsa, id_rsa, then ssh-agent)</label><input class="mono" data-f="keyPath" value="${esc(m.keyPath)}" placeholder="C:\\Users\\you\\.ssh\\id_ed25519"></div>` : ''}
+        <div class="field c3"><label>Private key (optional; default tries ~/.ssh/id_ed25519, id_ecdsa, id_rsa, then ssh-agent)</label><input class="mono" data-f="keyPath" value="${esc(m.keyPath)}" placeholder="C:\\Users\\you\\.ssh\\id_ed25519"></div>
+        <div class="field c3"><label>Jump host (optional, like ssh -J; blank uses ProxyJump from ~/.ssh/config)</label><input class="mono" data-f="jump" value="${esc(m.jump || '')}" placeholder="user@bastion.example.com:22"></div>` : ''}
       </div>
       ${ssh ? `<div class="m-form-actions">
         <button class="btn sm" data-sact="test">${I.plug} Test connection</button>
@@ -1607,6 +1783,9 @@
         <div class="field c3"><label>Team chat lives on</label><select data-c="hub"><option value="">Auto (first SSH machine by hostname)</option>${d.machines.filter((m) => m.type === 'ssh').map((m) => { const h = (S.mstate[m.id] || {}).hostname; return h ? `<option value="${esc(h)}" ${(d.collab || {}).hub === h ? 'selected' : ''}>${esc(m.name)} (${esc(h)})</option>` : ''; }).join('')}</select></div>
         <label class="check field c6" style="flex-direction:row"><input type="checkbox" data-c="announce" ${(d.collab || {}).announce !== false ? 'checked' : ''}><span>Post in team chat when I start an agent on a shared machine</span></label>
         <label class="check field c6" style="flex-direction:row"><input type="checkbox" data-a="restoreSession" ${a.restoreSession !== false ? 'checked' : ''}><span>Restore sessions, layout and folders when Nexus starts</span></label>
+        <label class="check field c6" style="flex-direction:row"><input type="checkbox" data-a="recordSessions" ${a.recordSessions ? 'checked' : ''}><span>Record remote sessions to <span class="mono">~/.nexus/logs</span> on the machine (audit trail; kept 30 days)</span></label>
+        <label class="check field c6" style="flex-direction:row"><input type="checkbox" data-mcp="enabled" ${(d.mcp || {}).enabled ? 'checked' : ''}><span>Let MCP clients on this PC control Nexus (list machines, launch agents, send text, read output). Register with Claude Code: <span class="mono" id="mcp-cmd">claude mcp add nexus -- node "${esc(S.mcpBridge || '…/scripts/nexus-mcp.js')}"</span></span></label>
+        <label class="check field c6" style="flex-direction:row"><input type="checkbox" data-top="offline" ${d.offline ? 'checked' : ''}><span>Offline / air-gapped mode: no update checks, no internet installers (tools install from <span class="mono">~/.nexus/offline/</span> on each machine)</span></label>
       </div>`;
   }
 
@@ -1649,6 +1828,8 @@
       const a = S.draft.appearance;
       a[t.dataset.a] = t.type === 'checkbox' ? t.checked : t.type === 'number' ? Number(t.value) : t.value;
     }
+    if (t.dataset.top) S.draft[t.dataset.top] = t.type === 'checkbox' ? t.checked : t.value.trim();
+    if (t.dataset.mcp) (S.draft.mcp = S.draft.mcp || {})[t.dataset.mcp] = t.checked;
   });
   $('#settings-body').addEventListener('click', async (e) => {
     const b = e.target.closest('[data-sact]');
@@ -1704,6 +1885,8 @@
   const sparkArgs = () => sshMachines().filter((m) => !m.invited)
     .map((m) => ({ machineId: m.id, hostname: (S.mstate[m.id] || {}).hostname || '', tsHost: m.tsHost || '' })).filter((x) => x.hostname || x.tsHost);
   const sshUsersFor = () => [...new Set(sshMachines().map((m) => m.user).filter(Boolean))];
+  // Per-guest Linux accounts (default for new setups); an existing setup keeps shared accounts until the owner switches.
+  const perGuest = () => { const t = S.cfg.tailscale || {}; return t.perGuestUsers != null ? !!t.perGuestUsers : !(SH.overview && SH.overview.guests && SH.overview.guests.length); };
 
   async function refreshShare({ overview = true } = {}) {
     SH.ts = await api.tsStatus();
@@ -1781,10 +1964,15 @@
 
     // 3. API token
     const token = ts.hasToken
-      ? `<p>API token saved, encrypted with your Windows account. <button class="linklike" data-sh="cleartoken">Remove</button></p>`
-      : `<p>Nexus needs a Tailscale <b>API access token</b> to send invites and set access rules. Create one at
-         <a href="https://login.tailscale.com/admin/settings/keys" target="_blank">login.tailscale.com → Settings → Keys</a> ("Generate access token…"), then paste it here.</p>
-         <div class="sh-inline"><input type="password" id="sh-token" placeholder="tskey-api-…" spellcheck="false"><button class="btn sm primary" data-sh="savetoken">Save</button></div>`;
+      ? `<p>${ts.tokenKind === 'oauth' ? 'OAuth client' : 'API token'} saved, encrypted with your ${IS_MAC ? 'Keychain' : IS_WIN ? 'Windows account' : 'keyring'}.${ts.tokenKind === 'api' ? ' <span class="dim">Tip: an OAuth client scoped to Nexus is safer than a personal token and never expires.</span>' : ''} <button class="linklike" data-sh="cleartoken">Remove</button></p>`
+      : `<p>Nexus needs a Tailscale credential to send invites and set access rules. <b>Recommended:</b> an <b>OAuth client</b> at
+         <a href="https://login.tailscale.com/admin/settings/oauth" target="_blank">login.tailscale.com → Settings → OAuth clients</a> with the scopes
+         <span class="mono">devices:core</span> (tag <span class="mono">tag:nexus-spark</span>), <span class="mono">policy_file</span> and <span class="mono">users</span>; paste its secret
+         (<span class="mono">tskey-client-…</span>). It only has the rights Nexus needs and never expires. (The tag must exist first: add
+         <span class="mono">"tag:nexus-spark": ["autogroup:admin"]</span> under <span class="mono">tagOwners</span> in your policy file, or run Review → Apply once with an API token.) Alternatively, an <b>API access token</b>
+         (<span class="mono">tskey-api-…</span>, your full admin rights, expires within 90 days) from
+         <a href="https://login.tailscale.com/admin/settings/keys" target="_blank">Settings → Keys</a>.</p>
+         <div class="sh-inline"><input type="password" id="sh-token" placeholder="tskey-client-… or tskey-api-…" spellcheck="false"><button class="btn sm primary" data-sh="savetoken">Save</button></div>`;
 
     // 4. Access rules
     let rules = '';
@@ -1795,8 +1983,12 @@
           + `<div class="sh-inline"><button class="btn sm primary" data-sh="apply" ${SH.plan.changes.length ? '' : 'disabled'}>Apply changes</button><button class="btn sm ghost" data-sh="cancelplan">Cancel</button></div>`;
       } else {
         const tagged = SH.overview && SH.overview.sparks.length && SH.overview.sparks.every((s) => s.device && s.device.tags.includes(SH.overview.tag));
-        rules = `<p>Guests get SSH to these machines only, as ${sshUsersFor().map((u) => `<span class="mono">${esc(u)}</span>`).join(' / ')}, through Tailscale SSH: no keys to hand out, and removing a guest cuts access straight away. Your own access stays unchanged.</p>`
-          + `<p class="warn small"><b>Guests log in as these same accounts.</b> They can read everything those accounts can: files, SSH keys, Claude / Antigravity / OpenClaw sign-ins, and your tmux sessions (read-only watching is a courtesy, not a lock). They could also leave something behind that keeps running after you remove them. Invite only people you'd trust with that account. Safer: share machines whose User is a dedicated, unprivileged account (no sudo, no personal sign-ins or keys).</p>`
+        rules = `<label class="check" style="flex-direction:row;margin:4px 0 8px"><input type="checkbox" data-sh="mode" ${perGuest() ? 'checked' : ''}><span>Give each guest their own Linux account (<span class="mono">nexus-&lt;name&gt;</span>), created on the shared machines when you invite them (recommended)</span></label>`
+          + (perGuest()
+            ? `<p>Guests get SSH to these machines only, each as their own account, through Tailscale SSH: no keys to hand out, and removing a guest removes their login at once. Their files stay in <span class="mono">/home/nexus-&lt;name&gt;</span>. Your own access (as ${sshUsersFor().map((u) => `<span class="mono">${esc(u)}</span>`).join(' / ')}) is unchanged.</p>`
+              + `<p class="warn small">Creating accounts needs sudo on each machine (Nexus opens a tab and asks). Guests still share the GPU, RAM and anything world-readable; agents they run sign in with their own credentials.</p>`
+            : `<p>Guests get SSH to these machines only, as ${sshUsersFor().map((u) => `<span class="mono">${esc(u)}</span>`).join(' / ')}, through Tailscale SSH: no keys to hand out, and removing a guest cuts access straight away. Your own access stays unchanged.</p>`
+              + `<p class="warn small"><b>Guests log in as these same accounts.</b> They can read everything those accounts can: files, SSH keys, Claude / Antigravity / OpenClaw sign-ins, and your tmux sessions (read-only watching is a courtesy, not a lock). They could also leave something behind that keeps running after you remove them. Invite only people you'd trust with that account. Safer: tick the box above.</p>`)
           + `<div class="sh-inline"><button class="btn sm ${tagged ? '' : 'primary'}" data-sh="plan">${tagged ? 'Re-check access rules' : 'Review access rules…'}</button>${tagged ? '<span class="chip" style="--mc:#73daca">Machines tagged and locked down</span>' : ''}</div>`;
       }
     }
@@ -1817,7 +2009,7 @@
       ${SH.error ? `<div class="m-error">${esc(SH.error)}</div>` : ''}
       ${step(1, 'This PC on Tailscale', pc, pcDone ? 'done' : '')}
       ${step(2, 'Machines on your tailnet', `<div class="sh-rows">${rows}</div><p class="dim small">"Join Tailscale" opens a terminal on that machine running <span class="mono">sudo tailscale up --ssh</span>: type the sudo password, then open the login link it prints.</p>`, sparksDone ? 'done' : '')}
-      ${step(3, 'Tailscale API token', token, ts.hasToken ? 'done' : '')}
+      ${step(3, 'Tailscale credential', token, ts.hasToken ? 'done' : '')}
       ${ts.hasToken ? step(4, 'Access rules', rules) : ''}
       ${ts.hasToken ? step(5, 'Guests', guests) : ''}
       <section class="sh-join"><h3>Got an invite code?</h3><p class="dim">Sign in to Tailscale with the invite link first, then paste the code to add the shared machines.</p>
@@ -1832,7 +2024,7 @@
 
   // Preview + apply a policy change. Returns true when applied (or nothing to do).
   async function applyPlan(args, { confirmText } = {}) {
-    const plan = await api.tsPlan({ machines: sparkArgs(), sshUsers: sshUsersFor(), ...args });
+    const plan = await api.tsPlan({ machines: sparkArgs(), sshUsers: sshUsersFor(), perGuestUsers: perGuest(), ...args });
     if (!plan.ok) throw new Error(plan.error);
     if (!plan.changes.length) return true;
     if (confirmText && !confirm(`${confirmText}\n\n• ${plan.changes.join('\n• ')}`)) return false;
@@ -1841,11 +2033,33 @@
     return true;
   }
 
+  // Per-guest accounts: run the account step on every shared machine in a visible tab (it needs sudo, so the owner
+  // types their password there). The script is idempotent; userdel is never run: a removed guest's account is locked
+  // and their processes killed, their home folder stays for the owner to inspect or delete.
+  const USERADD = (u, email) => `u=${u}; if id -u "$u" >/dev/null 2>&1; then echo "account $u exists"; else sudo useradd -m -s /bin/bash -c ${JSON.stringify(`Nexus guest ${email}`)} "$u" && echo "created $u"; fi; `
+    + `sudo usermod -U "$u" 2>/dev/null; for g in video render docker; do getent group "$g" >/dev/null && sudo usermod -aG "$g" "$u"; done; `
+    + `sudo chmod 750 "/home/$u" 2>/dev/null; sudo -u "$u" -H bash -lc 'mkdir -p ~/.nexus && chmod 700 ~/.nexus && command -v claude >/dev/null || echo "note: claude is not on PATH for this account; it needs its own install or a shared one in /usr/local/bin"'; echo done`;
+  const USERLOCK = (u) => `u=${u}; if id -u "$u" >/dev/null 2>&1; then sudo usermod -L "$u" && sudo pkill -u "$u"; echo "locked $u (home folder kept)"; else echo "no account $u"; fi`;
+  function createGuestAccounts(sparks, user, email) {
+    for (const m of sparks) launch(m.id, 'shell', { raw: true, cmd: USERADD(user, email), name: `Account ${user} → ${m.name}` });
+    toast(`Creating ${user} on ${sparks.map((m) => m.name).join(', ')} (sudo password in the new tab${sparks.length > 1 ? 's' : ''})`, 'ok', 6000);
+  }
+  function lockGuestAccounts(sparks, user) {
+    for (const m of sparks) launch(m.id, 'shell', { raw: true, cmd: USERLOCK(user), name: `Lock ${user} → ${m.name}` });
+  }
+
   async function onShareClick(e) {
     const b = e.target.closest('[data-sh]');
     if (!b) return;
     const act = b.dataset.sh;
     if (act === 'close') return closeShare();
+    if (act === 'mode') {
+      await api.tsSetMode({ perGuestUsers: b.checked });
+      S.cfg.tailscale = { ...(S.cfg.tailscale || {}), perGuestUsers: b.checked };
+      SH.plan = null;
+      renderShare();
+      return;
+    }
     if (act === 'refresh') return busy('refresh', () => refreshShare());
     if (act === 'install') {
       if (IS_MAC) return window.open('https://tailscale.com/download/mac');
@@ -1863,12 +2077,12 @@
     if (act === 'savetoken') return busy('token', async () => {
       const r = await api.tsSetToken($('#sh-token').value);
       if (!r.ok) throw new Error(r.error);
-      toast(`Token saved. ${r.devices} devices on your tailnet.`, 'ok');
+      toast(`Credential saved. ${r.devices} devices on your tailnet.`, 'ok');
       await refreshShare();
     });
     if (act === 'cleartoken') { await api.tsClearToken(); SH.overview = null; return refreshShare(); }
     if (act === 'plan') return busy('plan', async () => {
-      const p = await api.tsPlan({ machines: sparkArgs(), sshUsers: sshUsersFor() });
+      const p = await api.tsPlan({ machines: sparkArgs(), sshUsers: sshUsersFor(), perGuestUsers: perGuest() });
       if (!p.ok) throw new Error(p.error);
       SH.plan = p;
       renderShare();
@@ -1889,11 +2103,13 @@
       if (!(await applyPlan({ addGuest: email }, { confirmText: `Give ${email} SSH access to your shared machines? This updates your tailnet:` }))) return;
       const inv = await api.tsInvite(email);
       if (!inv.ok) throw new Error(inv.error);
+      const guestUser = perGuest() ? await api.tsGuestUser(email) : null;
+      if (guestUser) createGuestAccounts(sparks, guestUser, email);
       const code = await api.tsEncodeInvite({
         tailnet: SH.ts.local.tailnet,
-        machines: sparks.map((m) => ({ name: m.name, host: m.tsHost, user: m.user, icon: machineIconKey(m) === 'nvidia' ? 'nvidia' : '' })),
+        machines: sparks.map((m) => ({ name: m.name, host: m.tsHost, user: guestUser || m.user, icon: machineIconKey(m) === 'nvidia' ? 'nvidia' : '' })),
       });
-      const users = sparks.map((m) => `${m.name}: ${m.user}`).join(', ');
+      const users = sparks.map((m) => `${m.name}: ${guestUser || m.user}`).join(', ');
       SH.result = {
         email, code,
         message: `You're invited to use my machines through Nexus.\n\n`
@@ -1913,6 +2129,7 @@
       if (!(await applyPlan({ removeGuest: email }))) return;
       const r = await api.tsRevoke({ userId: g.userId, inviteId: g.inviteId });
       if (!r.ok) throw new Error(r.error);
+      if (perGuest()) lockGuestAccounts(sshMachines().filter((m) => m.tsHost && !m.invited), await api.tsGuestUser(email), email);
       toast(`${email} removed`, 'ok');
       await refreshShare();
     });
@@ -1946,7 +2163,7 @@
   // ---------------------------------------------------------------- team chat + presence
   // Chat and presence live on one "hub" SSH machine (~/.nexus/collab). Everyone's Nexus reads/writes them over its own
   // SSH connection; presence (who has which session open) drives the "someone's already in there" warnings.
-  const TM = { hubId: null, live: false, messages: [], seen: new Set(), presence: [], unread: 0, open: false, status: '', starting: false };
+  const TM = { hubId: null, live: false, messages: [], seen: new Set(), presence: [], unread: 0, open: false, status: '', starting: false, claims: [] };
   const collabCfg = () => (S.cfg.collab = S.cfg.collab || {});
   const myClient = () => collabCfg().client;
   const myName = () => collabCfg().name || (S.tsUser && S.tsUser.name) || 'Me';
@@ -1992,7 +2209,8 @@
   }
   async function heartbeat() {
     if (!TM.live) { ensureHub(); return; }
-    const r = await api.collabHeartbeat({ ...me(), status: TM.status, sessions: mySessions() });
+    TM.claims = TM.claims.filter((c) => c.until > now());
+    const r = await api.collabHeartbeat({ ...me(), status: TM.status, sessions: mySessions(), claims: TM.claims });
     if (r.ok) { TM.presence = r.presence; renderTeam(); renderChrome(); }
   }
 
@@ -2072,6 +2290,57 @@
     return v === 'go';
   }
 
+  // Someone claimed the machine (/claim): ask before starting an agent there, or queue it until the machine is free.
+  async function checkClaim(machineId, presetId, extra) {
+    if (!isAgent({ presetId }) || machineById(machineId).type !== 'ssh') return true;
+    const claims = claimedBy(machineId);
+    if (!claims.length) return true;
+    const c = claims[0];
+    const v = await choose({
+      title: `${machineById(machineId).name} is claimed`,
+      desc: `${c.person} claimed it until ${fmtTime(c.until)}${c.note ? ` (${c.note})` : ''}. Starting ${presetById(presetId).name} now competes for its GPU and memory.`,
+      options: [{ label: 'Cancel', value: null, ghost: true }, { label: `Message ${c.person}`, value: 'msg' }, { label: 'Start when free', value: 'queue' }, { label: 'Start anyway', value: 'go', primary: true }],
+    });
+    if (v === 'msg') { openTeam(`@${c.person.split(/\s+/)[0]} `); return false; }
+    if (v === 'queue') { enqueue(machineId, presetId, extra, `until ${c.person}'s claim ends`); return false; }
+    return v === 'go';
+  }
+
+  // ---- launch queue: start an agent once a machine is unclaimed and its GPU is idle ----
+  const GPU_IDLE = 20; // % utilisation below which a GPU counts as free, for two samples in a row
+  function enqueue(machineId, presetId, extra, why) {
+    S.queue.push({ id: `q${Date.now().toString(36)}`, machineId, presetId, extra: { ...extra }, why, idleSamples: 0, at: now() });
+    toast(`Queued ${presetById(presetId).name} on ${machineById(machineId).name} ${why}. Nexus starts it when the machine is free (see Ctrl+Shift+P → Queue).`, 'ok', 6000);
+    renderSidebar();
+  }
+  function machineFree(machineId) {
+    if (claimedBy(machineId).length) return false;
+    const x = (S.mstate[machineId] || {}).stats;
+    return !x || !x.gpu || x.gpu.error || x.gpu.util == null || x.gpu.util < GPU_IDLE;
+  }
+  async function runQueue() {
+    for (const q of [...S.queue]) {
+      if ((S.mstate[q.machineId] || {}).status !== 'online') continue;
+      q.idleSamples = machineFree(q.machineId) ? q.idleSamples + 1 : 0;
+      if (q.idleSamples < 2) continue;
+      S.queue = S.queue.filter((x) => x !== q);
+      const m = machineById(q.machineId), p = presetById(q.presetId);
+      api.notify({ title: `${m.name} is free`, body: `Starting ${p.name}${q.extra.cwd ? ` in ${q.extra.cwd}` : ''}` });
+      toast(`${m.name} is free: starting ${p.name}`, 'ok', 5000);
+      await launch(q.machineId, q.presetId, { ...q.extra, queued: true });
+    }
+  }
+  function openQueue() {
+    openPicker({
+      placeholder: S.queue.length ? 'Queued launches (select to cancel)…' : 'Nothing is queued. Launching on a claimed machine offers "Start when free".',
+      items: () => S.queue.map((q) => ({
+        group: 'Queue', glyph: q.presetId, m: q.machineId, c: presetById(q.presetId).color,
+        label: `${presetById(q.presetId).name} on ${machineById(q.machineId).name}${q.extra.cwd ? ` · ${baseName(q.extra.cwd)}` : ''}`,
+        sub: `waiting ${q.why} · cancel`, run: () => { S.queue = S.queue.filter((x) => x !== q); renderSidebar(); toast('Removed from the queue'); },
+      })),
+    });
+  }
+
   // ---- chat drawer ----
   function openTeam(prefill) {
     TM.open = true;
@@ -2136,7 +2405,7 @@
       prev = m;
       return cont ? `<div class="tm-msg cont"><div class="tm-text">${linkify(m.text)}</div></div>`
         : `<div class="tm-msg">${avatar(m.from.name)}<div class="tm-body"><div class="tm-meta">${who(m.from)}<span class="dim">${fmtTime(m.ts)}</span></div><div class="tm-text">${linkify(m.text)}</div></div></div>`;
-    }).join('') || '<div class="tm-empty">No messages yet. Say what you\'re working on so nobody doubles up.<br><span class="dim">Tip: <b>/status Training on the GPU box until 3pm</b> sets your status.</span></div>';
+    }).join('') || '<div class="tm-empty">No messages yet. Say what you\'re working on so nobody doubles up.<br><span class="dim">Tips: <b>/status Training on the GPU box until 3pm</b> sets your status · <b>/claim gpu-box 2h fine-tuning</b> claims a machine (<b>/release gpu-box</b> when done).</span></div>';
     if (scroll || atBottom) list.scrollTop = list.scrollHeight;
   }
 
@@ -2153,8 +2422,30 @@
       if (await postTeam(TM.status, 'status')) { input.value = ''; heartbeat(); }
       return;
     }
+    if (/^\/claim\b/.test(text)) {
+      const c = parseClaim(text);
+      if (!c) { toast('Usage: /claim <machine> <2h | 45m | 15:00> [what for]', 'warn'); return; }
+      const m = machineByHostOrName(c.host);
+      if (!m) { toast(`No machine called "${c.host}". Use a machine's name or hostname`, 'warn'); return; }
+      c.host = hostOf(m.id) || c.host;
+      TM.claims = [...TM.claims.filter((x) => x.host !== c.host), c];
+      if (await postTeam(`claimed ${m.name} until ${fmtTime(c.until)}${c.note ? ` · ${c.note}` : ''}`, 'activity')) { input.value = ''; heartbeat(); renderSidebar(); }
+      return;
+    }
+    const rl = /^\/release\s+(\S+)/.exec(text);
+    if (rl) {
+      const m = machineByHostOrName(rl[1]);
+      const host = m ? hostOf(m.id) : rl[1];
+      TM.claims = TM.claims.filter((x) => x.host !== host);
+      if (await postTeam(`released ${m ? m.name : rl[1]}`, 'activity')) { input.value = ''; heartbeat(); renderSidebar(); }
+      return;
+    }
     if (await postTeam(text)) input.value = '';
   }
+  const machineByHostOrName = (x) => S.cfg.machines.find((m) => m.type === 'ssh' && (hostOf(m.id).toLowerCase() === String(x).toLowerCase() || m.name.toLowerCase() === String(x).toLowerCase()));
+  // Claims on a machine by other people (not expired), for cards and launch checks.
+  const claimedBy = (machineId) => claimsOn(TM.presence, hostOf(machineId), myClient());
+  const myClaimOn = (machineId) => TM.claims.find((c) => c.host === hostOf(machineId) && c.until > now());
 
   // Others' presence on my sidebar items: who else is in a session / has a detached one open.
   function othersOnSession(machineId, tmux) {
@@ -2252,6 +2543,7 @@
       if ((m.type === 'ssh' && (m.host || m.tsHost)) || m.type === 'wsl') if ((S.mstate[m.id] || {}).status !== 'online') connectMachine(m.id);
     }
     api.appInfo().then((i) => { S.version = i.version; });
+    api.mcpStatus().then((i) => { S.mcpBridge = i.bridge; }).catch(() => {});
     TM.status = collabCfg().status || '';
     initTeam();
   }

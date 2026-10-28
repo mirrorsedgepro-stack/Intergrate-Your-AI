@@ -70,3 +70,29 @@ test('known_hosts: plain, hashed, non-standard port, mismatch, revoked', () => {
   assert.strictEqual(checkKnownHosts([path.join(tmp, 'missing')], 'x', 22, good), 'unknown');
   assert.match(fingerprint(good), /^SHA256:[A-Za-z0-9+/]+$/);
 });
+
+test('ssh_config: Match host / all blocks apply, other criteria are skipped; ProxyJump becomes a jump chain', () => {
+  const { matchApplies, parseJump } = require('../lib/sshconfig');
+  const cfg = write('config-match', [
+    'Host gpu*',
+    '  ProxyJump ops@bastion.example.com:2222,inner',
+    'Match host gpu-2',
+    '  Port 2200',
+    'Match user someone',
+    '  Port 9999',
+    'Match all',
+    '  User everyone',
+    'Host direct',
+    '  ProxyJump none',
+  ].join('\n'));
+  const a = sshConfigFor('gpu-2', cfg);
+  assert.strictEqual(a.port, 2200);
+  assert.strictEqual(a.user, 'everyone');
+  assert.deepStrictEqual(a.jumps, [{ user: 'ops', host: 'bastion.example.com', port: 2222 }, { user: null, host: 'inner', port: null }]);
+  assert.deepStrictEqual(sshConfigFor('direct', cfg).jumps, []);
+  assert.strictEqual(sshConfigFor('gpu-1', cfg).port, undefined);
+  assert.strictEqual(matchApplies('host gpu-*,!gpu-9', 'gpu-9'), false);
+  assert.strictEqual(matchApplies('!host other', 'gpu-9'), true);
+  assert.strictEqual(matchApplies('exec "true"', 'gpu-9'), false);
+  assert.deepStrictEqual(parseJump('[fd00::1]:22'), { user: null, host: 'fd00::1', port: 22 });
+});
