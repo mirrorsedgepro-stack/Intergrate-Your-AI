@@ -47,6 +47,7 @@ contextBridge.exposeInMainWorld('nexus', {
   resize: (id, cols, rows) => ipcRenderer.send('session:resize', id, cols, rows),
   close: (id, opts) => ipcRenderer.invoke('session:close', id, opts),
   cwd: (id) => ipcRenderer.invoke('session:cwd', id),
+  agentStatus: (id) => ipcRenderer.invoke('session:agent-status', id),
   pasteImage: (id) => ipcRenderer.invoke('session:paste-image', id),
   uploadFiles: (id, paths) => ipcRenderer.invoke('session:upload-files', id, (paths || []).filter((p) => dropped.has(p))),
 

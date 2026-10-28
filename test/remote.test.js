@@ -86,7 +86,51 @@ test('Claude alert hooks: added once, existing settings preserved', () => {
   assert.strictEqual(s.model, 'opus');
   assert.strictEqual(s.hooks.Stop.length, 2);
   assert.strictEqual(s.hooks.Notification.length, 1);
-  assert.strictEqual(s.hooks.Stop[1].hooks[0].command, String.raw`printf '\a' > /dev/tty 2>/dev/null || true`);
+  assert.strictEqual(s.hooks.Stop[1].hooks[0].command, 'bash "$HOME/.nexus/claude-hook.sh"');
+});
+
+test('Claude alert hooks: the bell-only hook from older Nexus versions is upgraded in place', () => {
+  const { ALERTS_PY, HOOK_SH } = require('../lib/remote');
+  const py = ['python3', 'python'].find((p) => { try { execFileSync(p, ['--version'], { stdio: 'ignore' }); return true; } catch { return false; } });
+  if (!py) return;
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-alerts-'));
+  fs.mkdirSync(path.join(home, '.claude'));
+  const file = path.join(home, '.claude', 'settings.json');
+  const old = String.raw`printf '\a' > /dev/tty 2>/dev/null || true`;
+  fs.writeFileSync(file, JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: old }] }], Notification: [{ hooks: [{ type: 'command', command: old }] }] } }));
+  const out = execFileSync(py, ['-'], { input: ALERTS_PY, env: { ...process.env, HOME: home, USERPROFILE: home }, encoding: 'utf8' });
+  assert.match(out, /alerts:2/);
+  const s = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.strictEqual(s.hooks.Stop.length, 1);
+  assert.strictEqual(s.hooks.Stop[0].hooks[0].command, 'bash "$HOME/.nexus/claude-hook.sh"');
+  assert.match(HOOK_SH, /^#!\/usr\/bin\/env bash/);
+});
+
+test('Claude hook script records the event and the last reply', { skip: !BASH && 'no bash available' }, () => {
+  const { HOOK_SH } = require('../lib/remote');
+  const py = ['python3', 'python'].find((p) => { try { execFileSync(p, ['--version'], { stdio: 'ignore' }); return true; } catch { return false; } });
+  if (!py || process.platform === 'win32') return;
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-hook-'));
+  const sh = path.join(home, 'hook.sh');
+  fs.writeFileSync(sh, HOOK_SH, { mode: 0o700 });
+  const transcript = path.join(home, 't.jsonl');
+  fs.writeFileSync(transcript, [
+    JSON.stringify({ type: 'user', message: { content: 'hi' } }),
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'Done: 3 files changed.' }] } }),
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash' }] } }),
+  ].join('\n'));
+  const env = { ...process.env, HOME: home, TMUX_PANE: '' };
+  execFileSync(BASH, [sh], { input: JSON.stringify({ hook_event_name: 'Stop', cwd: '/srv/proj', transcript_path: transcript }), env, encoding: 'utf8' });
+  const files = fs.readdirSync(path.join(home, '.nexus', 'agent')).filter((f) => f.endsWith('.json'));
+  assert.strictEqual(files.length, 1);
+  const rec = JSON.parse(fs.readFileSync(path.join(home, '.nexus', 'agent', files[0]), 'utf8'));
+  assert.strictEqual(rec.event, 'Stop');
+  assert.strictEqual(rec.cwd, '/srv/proj');
+  assert.strictEqual(rec.summary, 'Done: 3 files changed.');
+  execFileSync(BASH, [sh], { input: JSON.stringify({ hook_event_name: 'Notification', message: 'Claude needs your permission to use Bash' }), env, encoding: 'utf8' });
+  const rec2 = JSON.parse(fs.readFileSync(path.join(home, '.nexus', 'agent', files[0]), 'utf8'));
+  assert.strictEqual(rec2.event, 'Notification');
+  assert.match(rec2.message, /permission/);
 });
 
 test('first-seen host keys: confirmed off the tailnet, pinned silently on it', () => {

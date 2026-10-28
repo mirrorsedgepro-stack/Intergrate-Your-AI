@@ -219,7 +219,19 @@
       markDone(s, true, body);
       renderChrome();
     };
-    term.onBell(() => signal());
+    // A bell from a remote agent session: ask what the hook recorded (needs permission? finished with what?) so the
+    // notification and the pane header say why it stopped, not just that it did.
+    term.onBell(async () => {
+      if (!s.tmuxName || !isAgent(s) || !s.pid) return signal();
+      let st = null;
+      try { st = await api.agentStatus(s.pid); } catch { /* no hook status */ }
+      if (st && now() - st.ts < 60000) {
+        s.agent = st;
+        const why = st.event === 'Notification' ? (st.message || 'needs your input') : (st.summary ? `Finished: ${st.summary}` : 'Finished');
+        signal(why);
+        renderChrome();
+      } else signal();
+    });
     term.parser.registerOscHandler(9, (data) => { if (!/^\d+;/.test(data)) signal(data); return true; });
     term.parser.registerOscHandler(777, (data) => { const [kind, , body] = data.split(';'); if (kind === 'notify') signal(body); return true; });
     // OSC 52 clipboard writes: full-screen apps (Claude Code) copy their own mouse selections this way, through
@@ -462,7 +474,7 @@
     }
   }
   function clearDone(s) {
-    if (s.activity === 'done') { s.activity = 'idle'; renderChrome(); }
+    if (s.activity === 'done') { s.activity = 'idle'; s.agent = null; renderChrome(); }
   }
   setInterval(() => {
     const t = now();
@@ -717,6 +729,7 @@
         + `<span class="chip" style="--mc:${m.color}">${esc(m.name)}</span>`
         + (s.cwd && s.cwd !== '~' ? `<span class="chip ghost" title="${esc(s.cwd)}">${I.folder}${esc(shortPath(s.cwd))}</span>` : '')
         + (s.readOnly ? '<span class="chip" style="--mc:#bb9af7">read-only</span>' : '')
+        + (s.agent && s.activity === 'done' ? `<span class="chip ${s.agent.event === 'Notification' ? 'ask' : ''}" title="${esc(s.agent.event === 'Notification' ? s.agent.message : s.agent.summary)}">${s.agent.event === 'Notification' ? '⚠ ' + esc((s.agent.message || 'needs input').slice(0, 60)) : '✓ ' + esc((s.agent.summary || 'finished').slice(0, 60))}</span>` : '')
         + stateChip
         + `<span class="p-sub" title="${esc(s.tmuxName ? `tmux session ${s.tmuxName}` : '')}">${esc(s.title)}</span>`
         + (isAgent(s) ? `<button class="icon-btn" data-pact="reply" title="Send last reply to another agent (Ctrl+Shift+S)">${I.send}</button>` : '')

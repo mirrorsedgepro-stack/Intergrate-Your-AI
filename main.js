@@ -634,6 +634,11 @@ ipcMain.handle('session:close', async (_e, id, opts = {}) => {
   if (opts.kill && s.tmuxName) await getMachine(s.machineId).killTmux(s.tmuxName);
   return true;
 });
+ipcMain.handle('session:agent-status', async (_e, id) => {
+  const s = sessions.get(id);
+  if (!s || !s.tmuxName) return null;
+  try { return await getMachine(s.machineId).agentStatus(s.tmuxName); } catch { return null; }
+});
 ipcMain.handle('session:cwd', async (_e, id) => {
   const s = sessions.get(id);
   if (!s || !s.tmuxName) return null;
