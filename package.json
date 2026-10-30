@@ -30,7 +30,7 @@
     "ssh2@1.17.0": true
   },
   "devDependencies": {
-    "electron-builder": "^26.15.3",
+    "electron-builder": "^26.18.0",
     "electron": "^44.10.0"
   },
   "author": "mirrorsedgepro-stack",
