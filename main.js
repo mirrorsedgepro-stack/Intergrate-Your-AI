@@ -368,21 +368,32 @@ ipcMain.handle('local:dirs', safe(async () => {
 }));
 
 // ---- IPC: Tailscale (sharing SSH machines with guests) ----
-// The API token is encrypted with the OS (DPAPI via safeStorage) and never leaves the main process.
+// The API token is encrypted with the OS (DPAPI via safeStorage, async API: the sync one is removed in Electron 46) and never leaves the main process.
 // On Linux without a keyring, safeStorage "encrypts" with a hard-coded key (backend basic_text): not a secret.
-function secureStorageOk() {
-  if (!safeStorage.isEncryptionAvailable()) return false;
+async function secureStorageOk() {
+  if (!(await safeStorage.isAsyncEncryptionAvailable())) return false;
   try { return process.platform !== 'linux' || safeStorage.getSelectedStorageBackend() !== 'basic_text'; } catch { return true; }
 }
-function tsToken() {
+async function tsToken() {
   const enc = (config.load().tailscale || {}).token;
-  if (!enc || !secureStorageOk()) return null;
-  try { return safeStorage.decryptString(Buffer.from(enc, 'base64')); } catch { return null; }
+  if (!enc || !(await secureStorageOk())) return null;
+  try {
+    const { result, shouldReEncrypt } = await safeStorage.decryptStringAsync(Buffer.from(enc, 'base64'));
+    // The OS rotated its key (or a stronger one is available): re-save the token under the new key.
+    if (shouldReEncrypt) {
+      try {
+        const c = config.load();
+        c.tailscale = { ...(c.tailscale || {}), token: (await safeStorage.encryptStringAsync(result)).toString('base64') };
+        config.save(c);
+      } catch { /* keep using the token; re-encrypt next time */ }
+    }
+    return result;
+  } catch { return null; }
 }
 // One client per saved credential, so an OAuth client's 1-hour access token is reused across calls.
 let tsClient = null;
-function tsApi() {
-  const t = tsToken();
+async function tsApi() {
+  const t = await tsToken();
   if (!t) throw new Error('Add a Tailscale API access token or OAuth client first');
   if (!tsClient || tsClient.raw !== t) tsClient = { raw: t, api: new tailscale.TailscaleApi(t) };
   return tsClient.api;
@@ -393,20 +404,19 @@ const selfName = async () => { try { const l = await tailscale.localStatus(); re
 // (and which Nexus computed) can change the tailnet.
 let lastPlan = null;
 
-ipcMain.handle('ts:status', async () => ({
-  local: await tailscale.localStatus(),
-  hasToken: !!tsToken(),
-  tokenKind: ((c) => (c ? c.kind : null))(tailscale.parseCredential(tsToken() || '')),
-  canEncrypt: secureStorageOk(),
-}));
+ipcMain.handle('ts:status', async () => {
+  const t = await tsToken();
+  const cred = tailscale.parseCredential(t || '');
+  return { local: await tailscale.localStatus(), hasToken: !!t, tokenKind: cred ? cred.kind : null, canEncrypt: await secureStorageOk() };
+});
 ipcMain.handle('ts:set-token', safe(async (_e, token) => {
   const t = String(token || '').trim();
   const cred = tailscale.parseCredential(t);
   if (!cred) throw new Error('That does not look like a Tailscale credential: paste an API access token (tskey-api-…) or an OAuth client secret (tskey-client-…, optionally as clientId:secret)');
   const devices = await new tailscale.TailscaleApi(cred).devices(); // validates the credential (and, for OAuth, its scopes)
-  if (!secureStorageOk()) throw new Error('Secure storage (Windows DPAPI, macOS Keychain or a Linux keyring such as gnome-keyring/KWallet) is unavailable; the token was not saved');
+  if (!(await secureStorageOk())) throw new Error('Secure storage (Windows DPAPI, macOS Keychain or a Linux keyring such as gnome-keyring/KWallet) is unavailable; the token was not saved');
   const c = config.load();
-  c.tailscale = { ...(c.tailscale || {}), token: safeStorage.encryptString(t).toString('base64') };
+  c.tailscale = { ...(c.tailscale || {}), token: (await safeStorage.encryptStringAsync(t)).toString('base64') };
   config.save(c);
   return { devices: devices.length };
 }));
@@ -420,7 +430,7 @@ ipcMain.handle('ts:clear-token', () => {
 
 // Everything the sharing panel shows: shared devices, guests (policy group), their join state, pending invites.
 ipcMain.handle('ts:overview', safe(async (_e, machines) => {
-  const api = tsApi();
+  const api = await tsApi();
   const [devices, users, invites, { policy }] = await Promise.all([api.devices(), api.users(), api.invites(), api.getPolicy()]);
   const guests = tailscale.guestsIn(policy).map((email) => {
     const u = users.find((x) => (x.loginName || '').toLowerCase() === email);
@@ -432,7 +442,7 @@ ipcMain.handle('ts:overview', safe(async (_e, machines) => {
 
 // Preview the policy + tag changes needed to share the machines (no changes made).
 ipcMain.handle('ts:plan', safe(async (_e, { machines, sshUsers, addGuest, removeGuest, perGuestUsers }) => {
-  const api = tsApi();
+  const api = await tsApi();
   const [{ policy, etag }, devices] = await Promise.all([api.getPolicy(), api.devices()]);
   let guests = tailscale.guestsIn(policy);
   if (addGuest) guests = [...guests, addGuest.toLowerCase()];
@@ -453,7 +463,7 @@ ipcMain.handle('ts:apply', safe(async (_e, req) => {
   if (!lastPlan || !req || req.etag !== lastPlan.etag) throw new Error('Review the access rules again before applying');
   const { policy, etag, tagChanges } = lastPlan;
   lastPlan = null;
-  const api = tsApi();
+  const api = await tsApi();
   const v = await api.validatePolicy(policy);
   if (v && v.message) throw new Error(`Tailscale rejected the policy: ${v.message}${v.data ? ' ' + JSON.stringify(v.data) : ''}`);
   await api.setPolicy(policy, etag);
@@ -462,11 +472,11 @@ ipcMain.handle('ts:apply', safe(async (_e, req) => {
 }));
 
 ipcMain.handle('ts:invite', safe(async (_e, email) => {
-  const inv = await tsApi().createInvite(email);
+  const inv = await (await tsApi()).createInvite(email);
   return { inviteUrl: inv && inv.inviteUrl, inviteId: inv && inv.id };
 }));
 ipcMain.handle('ts:revoke', safe(async (_e, { userId, inviteId }) => {
-  const api = tsApi();
+  const api = await tsApi();
   if (inviteId) await api.deleteInvite(inviteId);
   if (userId) await api.deleteUser(userId);
   return {};
