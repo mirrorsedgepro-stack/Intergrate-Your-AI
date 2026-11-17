@@ -48,12 +48,17 @@ The machine needs `sshd` running (`sudo apt install openssh-server`).
 
 | | |
 |---|---|
+| **Fleet view** | Ctrl+Shift+A (or the tray icon in the title bar, which counts who is waiting): every session as a live thumbnail with its state (working, idle, finished, needs you). Agents that stopped for you are listed first with what they asked, and can be answered in place: press 1 / 2 / 3 / Enter / Esc for a permission prompt, or type a reply. Sessions still running on your machines that aren't open in this window are listed too (with what Claude last reported, when *Enable Claude alerts* is on). |
+| **Git worktrees** | Machine ⋯ menu → **In a new git worktree** (or "worktree" in the palette): pick a repository and a branch name, and the agent starts in its own working folder, `<repo>-worktrees/<branch>` beside the repository, so several agents on one project can't overwrite each other's files. Remove one with `git worktree remove` when the branch is merged. |
+| **Prompt library** | In the broadcast box, **Save as prompt** keeps the text; **Prompts** (or typing "prompt" in the palette) puts a saved one back, ready to edit and send to any number of sessions. |
+| **Phone alerts** | Settings → *Phone alerts*: give an [ntfy](https://ntfy.sh) topic address (ntfy.sh or your own server) and your phone is told when an agent finishes or needs you while Nexus isn't in front. By default only the session's name is sent; ticking *Include what the agent said* sends its message too. Anyone who knows the address can read the alerts, so use a long random topic. Offline mode does not stop these: they only ever go to the address you set. |
+| **Session replay** | Machine ⋯ menu → **Replay recorded sessions…**: pick a recording (see *Session recording*) and scrub through it, or play it back at 1× to 64×. It opens on the last screen; the newest 6 MB of a recording are loaded. Recordings don't store the window size: set the columns to the width it was recorded at if a full-screen program looks scrambled. |
 | **Workspaces** | Save the current arrangement (agents, machines, folders, split sizes) and reopen it in one click: Ctrl+Shift+O. |
 | **Session restore** | On start, Nexus reopens last time's layout: remote sessions reattach to their tmux sessions, local ones restart in the same folder. |
 | **Project folders** | Shift+click or right-click a launcher (or Ctrl+Shift+N) to pick a folder: recent folders, git projects and top-level folders on that machine, or type any path. |
 | **Images & files** | Ctrl+V with a screenshot on the clipboard saves it as a PNG on the session's machine and pastes the path. Drop files onto a pane to do the same. Remote copies go to `~/.nexus/uploads` and are deleted after 7 days. |
-| **Agent alerts** | Bells and OSC 9/777 notifications mark a session as waiting and raise a Windows notification. With "Enable Claude alerts" Claude rings exactly when it stops or needs you; other agents fall back to output-activity detection. |
-| **Machine stats** | Each machine card (this PC, WSL distros and SSH machines) shows GPU load, temperature and power (`nvidia-smi`), RAM, CPU load, free disk on the home filesystem and network throughput in/out, refreshed every 5 s. |
+| **Agent alerts** | Bells and OSC 9/777 notifications mark a session as waiting and raise a desktop notification (which leads back to that session). With "Enable Claude alerts" Claude rings exactly when it stops or needs you; other agents fall back to output-activity detection. |
+| **Machine stats** | Each machine card (this PC, WSL distros and SSH machines) shows GPU load, GPU memory, temperature and power (`nvidia-smi`), RAM, CPU load, free disk on the home filesystem and network throughput in/out, refreshed every 5 s. |
 | **Port forwarding** | Machine ⋯ menu → **Forward a port…**: a remote web UI (OpenClaw gateway, Jupyter, TensorBoard) becomes `http://localhost:<port>` over the SSH connection, loopback only. |
 | **Jump hosts** | `ProxyJump` and `Match host` in `~/.ssh/config` are honoured; a machine can also set its own **Jump host** in Settings (like `ssh -J`). |
 | **Session recording** | Settings → *Record remote sessions*: everything an agent prints goes to `~/.nexus/logs/<session>-<date>.log` on the machine (`tmux pipe-pane`), kept 30 days. |
@@ -163,17 +168,21 @@ the last session and pinned host keys carry over, and sessions left running in t
 are different:
 
 - **Install it once by hand.** 1.x can't update itself to 2.0; download the installer from Releases. On Windows it
-  installs over the old version in the same folder. From 2.0 on, Nexus announces new versions itself (Windows: it
-  downloads the installer when you ask, checks it against the SHA-256 GitHub publishes for it, and runs it).
+  installs over the old version in the same folder. From 2.0 on, Nexus announces new versions itself and, when
+  you ask, downloads the installer and checks it against the SHA-256 GitHub publishes for it. Windows then runs it;
+  macOS opens the disk image for you to drag across; Linux installs the `.deb` through the system's password prompt
+  (when Nexus was installed from a `.deb`; otherwise the file is left in Downloads).
 - **Tailscale credential:** paste it again in Share. 1.x kept it encrypted in a way only Electron can read; 2.0 keeps
   it in the OS keychain.
 - **MCP:** the bridge is now a program, not a Node script. Re-register it: `claude mcp remove nexus`, then the
   `claude mcp add …` command Settings shows.
 - **Terminal text:** the font comes from Settings → Font family if it is installed on this computer (otherwise a
-  built-in monospace font). There are no ligatures or italics, colour emoji show as outlines or blanks, and input
-  methods (IME) for composing CJK text are not supported yet.
-- **Window:** the normal title bar of your OS. Clicking a notification no longer jumps to its session. Starting Nexus a
-  second time does nothing while it is already open.
+  built-in monospace font). Italics are slanted versions of that font, emoji use the system's colour emoji font
+  (Segoe UI Emoji, Apple Color Emoji, Noto Color Emoji), and input methods (IME) for composing CJK text work in the
+  terminal. There are no ligatures.
+- **Window:** the normal title bar of your OS. Starting Nexus a second time does nothing while it is already open.
+- **Notifications:** on Linux, clicking one brings Nexus forward on that session. Windows and macOS don't report the
+  click to Nexus, so there, coming back to Nexus within 20 seconds of a notification lands on its session.
 
 ## Development
 
@@ -183,7 +192,7 @@ scripts/package.sh    # this platform's installer(s) into dist/  (Linux: .deb ·
 ```
 
 Useful when working on the UI: `NEXUS_SCREENSHOT=shot.png cargo run` saves a picture of the window three seconds after
-start and quits (`NEXUS_OPEN=palette|settings|share|team|composer|workspaces` opens that view first;
+start and quits (`NEXUS_OPEN=palette|settings|share|team|composer|workspaces|fleet|prompts|replay` opens that view first;
 `NEXUS_CONFIG_DIR=<folder>` uses a config other than your own). It works under `xvfb-run`.
 
 CI runs the tests on Windows, macOS and Linux on every push and builds the installers on pull requests. To publish a
@@ -194,8 +203,13 @@ installer) must both be clean, and ClamAV ([hugoalh/scan-virus-ghaction](https:/
 runs as a reported check. Only then is the release published, with the VirusTotal reports, the scan log and SHA-256
 checksums in its notes. The workflow needs a `VT_API_KEY` repository secret.
 
-**Code signing** is not wired into the Rust build yet: installers are unsigned (the macOS app is ad-hoc signed so it
-runs on Apple Silicon). Workflow actions are pinned to commit SHAs and kept current by Dependabot, which also watches
+**Code signing** switches on when its repository secrets exist; without them installers are unsigned (the macOS app is
+ad-hoc signed so it runs on Apple Silicon). Windows (Authenticode): `WINDOWS_CERT_PFX_BASE64` (the .pfx, base64) and
+`WINDOWS_CERT_PASSWORD` sign both programs and the installer. macOS (Developer ID): `MACOS_CERT_P12_BASE64`,
+`MACOS_CERT_PASSWORD` and `MACOS_SIGN_IDENTITY` (e.g. `Developer ID Application: Your Name (TEAMID)`) sign the app and
+disk image with the hardened runtime; adding `APPLE_ID`, `APPLE_TEAM_ID` and `APPLE_APP_PASSWORD` (an app-specific
+password) notarizes and staples them. The signing steps have not been run yet: no certificates were available.
+Workflow actions are pinned to commit SHAs and kept current by Dependabot, which also watches
 the Rust dependencies.
 
 ## Credits

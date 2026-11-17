@@ -13,6 +13,14 @@ use std::sync::{Arc, Mutex};
 
 pub const BG: Color32 = Color32::from_rgb(0x0b, 0x0f, 0x18);
 pub const FG: Color32 = Color32::from_rgb(0xc8, 0xd3, 0xf5);
+/// The font family for emoji code points: the system's colour emoji font first (see ui::load_fonts).
+pub const EMOJI_FAMILY: &str = "term-emoji";
+/// Is this cell a picture rather than text? The emoji planes; the older symbols that are emoji by default (the
+/// terminal gives exactly those two cells: ✅ ⏰ ⭐); and anything followed by the emoji selector.
+pub fn is_emoji(c: char, wide: bool, selector: bool) -> bool {
+    let u = c as u32;
+    selector || (0x1f000..=0x1fffd).contains(&u) || (wide && (0x2300..=0x2bff).contains(&u))
+}
 const SELECTION: Color32 = Color32::from_rgb(0x2b, 0x3b, 0x62);
 /// black, red, green, yellow, blue, magenta, cyan, white, then the bright eight.
 const ANSI: [u32; 16] = [0x1d2233, 0xf7768e, 0x9ece6a, 0xe0af68, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0xa9b1d6, 0x4e5675, 0xff8fa3, 0xb9f27c, 0xffc777, 0x8db0ff, 0xc9aaff, 0xa4e4ff, 0xe6ebff];
@@ -178,6 +186,18 @@ impl Terminal {
         }).collect()
     }
 
+    /// Where the cursor is on screen (column, row), when it is in view.
+    pub fn cursor_cell(&self) -> Option<(u16, u16)> {
+        let p = self.term.grid().cursor.point;
+        let row = p.line.0 + self.term.grid().display_offset() as i32;
+        (0..i32::from(self.rows)).contains(&row).then_some((p.column.0 as u16, row as u16))
+    }
+    /// How many visible rows are in use: up to the last one with text (or the cursor), for previews.
+    pub fn content_rows(&self) -> u16 {
+        let cur = self.cursor_cell().map_or(0, |c| c.1 + 1);
+        (cur..self.rows).rev().find(|r| !self.visible_line(*r).trim().is_empty()).map_or(cur, |r| r + 1)
+    }
+
     /// Text of one visible row.
     pub fn visible_line(&self, row: u16) -> String {
         let l = Line(i32::from(row) - self.term.grid().display_offset() as i32);
@@ -323,7 +343,7 @@ impl Terminal {
         let origin = rect.left_top();
         // Runs of cells with the same look are drawn as one string; anything that isn't plain ASCII is placed cell by cell
         // so fallback fonts with other widths can't shift the rest of the line.
-        struct Run { row: i32, col: usize, text: String, fg: Color32, bold: bool, last: usize }
+        struct Run { row: i32, col: usize, text: String, fg: Color32, bold: bool, italic: bool, emoji: bool, last: usize }
         let mut run: Option<Run> = None;
         let flush = |r: Option<Run>| {
             let Some(r) = r else { return };
@@ -336,6 +356,17 @@ impl Terminal {
                     let (cx, cy) = match bit { 0 => (0, 0), 1 => (0, 1), 2 => (0, 2), 3 => (1, 0), 4 => (1, 1), 5 => (1, 2), 6 => (0, 3), _ => (1, 3) };
                     painter.circle_filled(cell_min + Vec2::new(cell.x * (0.3 + 0.4 * cx as f32), cell.y * (0.2 + 0.2 * cy as f32)), (cell.x * 0.11).max(0.8), r.fg);
                 }
+                return;
+            }
+            if r.emoji {
+                painter.text(pos, egui::Align2::LEFT_TOP, r.text, FontId::new(font.size, egui::FontFamily::Name(EMOJI_FAMILY.into())), r.fg);
+                return;
+            }
+            if r.italic {
+                // Slanted by egui (no italic face is loaded); bold italics use the bold face when there is one.
+                let font_id = if r.bold { bold.unwrap_or(font).clone() } else { font.clone() };
+                let job = egui::text::LayoutJob::single_section(r.text, egui::TextFormat { font_id, color: r.fg, italics: true, ..Default::default() });
+                painter.galley(pos, painter.layout_job(job), r.fg);
                 return;
             }
             match (r.bold, bold) {
@@ -368,9 +399,10 @@ impl Terminal {
             let ch = c.c;
             if ch == ' ' || ch == '\0' || c.flags.contains(Flags::HIDDEN) { continue; }
             let is_bold = c.flags.contains(Flags::BOLD);
+            let is_italic = c.flags.contains(Flags::ITALIC);
             let simple = ch.is_ascii() && c.zerowidth().is_none();
             match run.as_mut() {
-                Some(r) if simple && r.row == row && r.fg == fg && r.bold == is_bold && col > r.last && col - r.last <= 8 => {
+                Some(r) if simple && r.row == row && r.fg == fg && r.bold == is_bold && r.italic == is_italic && col > r.last && col - r.last <= 8 => {
                     for _ in r.last + 1..col { r.text.push(' '); }
                     r.text.push(ch);
                     r.last = col;
@@ -379,7 +411,8 @@ impl Terminal {
                     flush(run.take());
                     let mut text = ch.to_string();
                     if let Some(z) = c.zerowidth() { text.extend(z); }
-                    let r = Run { row, col, text, fg, bold: is_bold, last: col };
+                    let emoji = !simple && is_emoji(ch, c.flags.contains(Flags::WIDE_CHAR), c.zerowidth().is_some_and(|z| z.contains(&'\u{fe0f}')));
+                    let r = Run { row, col, text, fg, bold: is_bold, italic: is_italic, emoji, last: col };
                     if simple { run = Some(r); } else { flush(Some(r)); }
                 }
             }
@@ -408,6 +441,26 @@ mod tests {
     use super::*;
 
     fn none() -> Modifiers { Modifiers::NONE }
+    #[test]
+    fn only_pictures_use_the_emoji_font() {
+        assert!(is_emoji('😀', true, false) && is_emoji('🚀', true, false) && is_emoji('✅', true, false) && is_emoji('⭐', true, false));
+        assert!(is_emoji('⚠', false, true), "a text symbol followed by the emoji selector");
+        for c in ['✓', '⚠', '▶', '─', '你', 'a', '●'] { assert!(!is_emoji(c, c == '你', false), "{c}"); }
+    }
+    #[test]
+    fn previews_know_where_the_content_and_cursor_are() {
+        let mut t = Terminal::new(40, 10);
+        assert_eq!((t.content_rows(), t.cursor_cell()), (1, Some((0, 0))));
+        t.feed(b"one\r\ntwo\r\n$ ");
+        assert_eq!((t.content_rows(), t.cursor_cell()), (3, Some((2, 2))));
+        // A full-screen program draws below the cursor: the status line at the bottom counts.
+        t.feed(b"\x1b[9;1Hstatus\x1b[2;1H");
+        assert_eq!((t.content_rows(), t.cursor_cell()), (9, Some((0, 1))));
+        // Scrolled back far enough, the cursor is out of view.
+        t.feed("x\r\n".repeat(30).as_bytes());
+        t.scroll(20);
+        assert_eq!(t.cursor_cell(), None);
+    }
     #[test]
     fn output_lands_in_the_grid_and_events_come_out() {
         let mut t = Terminal::new(40, 5);

@@ -216,6 +216,22 @@ impl App {
 
             let blink_on = now - s.last_input < 600 || (now / 530) % 2 == 0;
             s.term.paint(&ui.painter_at(body), rect, &self.font.id, self.font.bold.as_ref(), cell, self.font.row_h, owns_kb, s.color, blink_on);
+            if owns_kb {
+                // Input methods (Chinese, Japanese, Korean, dead keys…): tell the system where the cursor is so its
+                // candidate window sits there, and show the text being composed until it is committed.
+                if let Some((col, row)) = s.term.cursor_cell() {
+                    let at = rect.min + Vec2::new(f32::from(col) * cell.x, f32::from(row) * cell.y);
+                    let cur = Rect::from_min_size(at, Vec2::new(1.0, cell.y));
+                    ui.ctx().output_mut(|o| o.ime = Some(egui::output::IMEOutput { purpose: egui::IMEPurpose::Terminal, rect: body, cursor_rect: cur, should_interrupt_composition: false }));
+                    if !self.preedit.is_empty() {
+                        let g = ui.painter().layout_no_wrap(self.preedit.clone(), self.font.id.clone(), crate::term::FG);
+                        let r = Rect::from_min_size(at, Vec2::new(g.size().x, cell.y));
+                        ui.painter().rect_filled(r, 0.0, PANEL3);
+                        ui.painter().hline(r.x_range(), r.bottom() - 1.0, egui::Stroke::new(1.0, s.color));
+                        ui.painter().galley(at, g, crate::term::FG);
+                    }
+                }
+            }
             if s.term.scrolled_back() { ui.painter().text(body.right_bottom() - Vec2::new(6.0, 4.0), egui::Align2::RIGHT_BOTTOM, "↑ scrollback", FontId::proportional(10.5), TEXT3); }
         }
         if is_focus { self.last_cells = (cols, rows); }

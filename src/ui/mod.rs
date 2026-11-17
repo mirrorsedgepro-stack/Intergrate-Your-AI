@@ -1,6 +1,7 @@
 //! The window: tabs, machine sidebar, terminal panes, palette, settings, sharing and team chat, drawn with egui.
 //! This file holds the app state, the event loop glue and the look; the other files in this folder add behaviour.
 mod chrome;
+mod fleet;
 mod overlays;
 mod panes;
 mod sessions;
@@ -108,13 +109,18 @@ fn load_fonts(ctx: &egui::Context, families: &str) -> bool {
             break;
         }
     }
-    let mut fallbacks = Vec::new();
-    for (i, fam) in ["DejaVu Sans Mono", "Menlo", "Consolas", "Segoe UI Symbol", "Apple Symbols", "Noto Sans Symbols2", "Noto Sans Symbols", "DejaVu Sans", "FreeMono", "Noto Emoji", "Segoe UI Emoji", "Symbola", "Noto Sans Mono CJK SC", "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC"].iter().enumerate() {
-        let name = format!("term-fallback-{i}");
-        if add(&mut defs, &name, fam, fontdb::Weight::NORMAL) { fallbacks.push(name); }
-    }
+    // Symbols and CJK fall back through text fonts; emoji get their own family ("term-emoji", used by the terminal for
+    // emoji code points only) that starts with the system's colour emoji font, so ✓ ⚠ ▶ stay plain text.
+    let group = |defs: &mut egui::FontDefinitions, tag: &str, fams: &[&str]| -> Vec<String> {
+        fams.iter().enumerate().filter_map(|(i, fam)| { let name = format!("term-{tag}-{i}"); add(defs, &name, fam, fontdb::Weight::NORMAL).then_some(name) }).collect()
+    };
+    let symbols = group(&mut defs, "symbol", &["DejaVu Sans Mono", "Menlo", "Consolas", "Segoe UI Symbol", "Apple Symbols", "Noto Sans Symbols2", "Noto Sans Symbols", "DejaVu Sans", "FreeMono"]);
+    let emoji = group(&mut defs, "emoji", &["Noto Color Emoji", "Apple Color Emoji", "Segoe UI Emoji"]);
+    let rest = group(&mut defs, "rest", &["Noto Emoji", "Symbola", "Noto Sans Mono CJK SC", "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC"]);
+    let fallbacks: Vec<String> = symbols.iter().chain(&rest).cloned().collect();
     let has_bold = !bold.is_empty();
     let chain = |first: Vec<String>| first.into_iter().chain(mono.iter().cloned()).chain(fallbacks.iter().cloned()).collect::<Vec<_>>();
+    defs.families.insert(FontFamily::Name(crate::term::EMOJI_FAMILY.into()), chain(emoji.iter().chain(&regular).cloned().collect()));
     if has_bold { bold.extend(regular.iter().cloned()); defs.families.insert(FontFamily::Name("term-bold".into()), chain(bold)); }
     defs.families.insert(FontFamily::Name("term".into()), chain(regular));
     // The UI font also gets the fallbacks (team chat and folder names can hold anything).
@@ -137,6 +143,8 @@ pub struct MState {
     pub home: String,
     pub user: String,
     pub stats: Option<Stats>,
+    /// What each agent session on the machine last reported through its hooks, by tmux session name.
+    pub agents: HashMap<String, crate::remote::AgentStatus>,
 }
 
 pub type Act = Rc<dyn Fn(&mut App)>;
@@ -186,6 +194,12 @@ pub struct App {
     pub composer: Option<overlays::Composer>,
     pub menu: Option<overlays::Menu>,
     pub share: Option<share::Share>,
+    pub fleet: Option<fleet::Fleet>,
+    pub replay: Option<fleet::Replay>,
+    /// The session the last desktop alert was about, and when (so coming back to the window lands on it).
+    last_alert: Option<(u64, i64)>,
+    /// Text being composed in an input method (IME), shown at the cursor until it is committed.
+    pub preedit: String,
     pub team: team::Team,
     pub toasts: Vec<Toast>,
     // timers (ms since epoch)
@@ -214,7 +228,7 @@ impl App {
             order: vec![], mru: vec![], layout: 1, panes: vec![None], focus: 0, split: (0.5, 0.5), win_focused: true, targets: HashSet::new(), auto_reattached: HashSet::new(), restoring: false,
             dir_cache: HashMap::new(), manual_disconnect: HashSet::new(), machine_retry: HashMap::new(), uid: 0, mouse_tip_shown: false,
             font: TermFont { id: FontId::monospace(14.0), bold: None, cell: Vec2::new(8.0, 16.0), row_h: 16.0 }, font_cfg: (String::new(), 0.0, 0.0), last_cells: (120, 30),
-            palette: None, settings: None, dialogs: vec![], composer: None, menu: None, share: None, team: team::Team::default(), toasts: vec![],
+            palette: None, settings: None, dialogs: vec![], composer: None, menu: None, share: None, fleet: None, replay: None, last_alert: None, preedit: String::new(), team: team::Team::default(), toasts: vec![],
             t_activity: 0, t_stats: now_ms(), t_refresh: now_ms(), t_heartbeat: now_ms(), persist_at: None, save_at: None, stats_busy: false,
             screenshot: std::env::var_os("NEXUS_SCREENSHOT").map(|p| (p.into(), now_ms() + 3000)), typed: false,
         };
@@ -242,10 +256,11 @@ impl App {
         let (w, h) = self.ctx.fonts_mut(|f| (f.glyph_width(&id, 'M'), f.row_height(&id)));
         if w <= 0.0 { return; }
         let ppp = self.ctx.pixels_per_point();
-        // Whole pixels per cell keep glyphs crisp and columns aligned.
+        // Rows sit on whole pixels. Columns are exactly one glyph advance wide (not rounded): a run of text is drawn
+        // as one string, and it has to end where the grid says it does.
         let snap = |v: f32| (v * ppp).round().max(1.0) / ppp;
         self.font.row_h = h;
-        self.font.cell = Vec2::new(snap(w), snap((self.font_cfg.1 * self.font_cfg.2.clamp(1.0, 2.0)).max(h)));
+        self.font.cell = Vec2::new(w, snap((self.font_cfg.1 * self.font_cfg.2.clamp(1.0, 2.0)).max(h)));
     }
 
     // ---------------------------------------------------------------- small helpers
@@ -279,9 +294,33 @@ impl App {
     pub fn toast_bad(&mut self, msg: impl Into<String>) { self.toast(msg, BAD, 6000); }
     pub fn toast_action(&mut self, msg: impl Into<String>, ms: i64, label: &str, a: Act) { self.toasts.push(Toast { msg: msg.into(), color: OK, until: now_ms() + ms, action: Some((label.into(), a)) }); }
 
-    pub fn notify(&self, title: &str, body: &str) {
+    /// A desktop notification. With a session, clicking it brings Nexus forward on that session (Linux desktops
+    /// report the click; on Windows and macOS coming back to Nexus right after the alert does the same).
+    pub fn notify(&mut self, title: &str, body: &str, session: Option<u64>) {
         let (title, body) = (crate::util::clip(title, 120), crate::util::clip(body, 300));
-        std::thread::spawn(move || { let _ = notify_rust::Notification::new().appname("Nexus").summary(&title).body(&body).show(); });
+        if let Some(id) = session { self.last_alert = Some((id, now_ms())); }
+        let be = self.be.clone();
+        std::thread::spawn(move || {
+            let mut n = notify_rust::Notification::new();
+            n.appname("Nexus").summary(&title).body(&body);
+            #[cfg(all(unix, not(target_os = "macos")))]
+            {
+                if session.is_some() { n.action("default", "Show"); }
+                let (Ok(handle), Some(id)) = (n.show(), session) else { return };
+                handle.wait_for_action(|action| { if action != "__closed" { be.emit(Event::Call(Box::new(move |app| app.jump_to(id)))); } });
+            }
+            #[cfg(not(all(unix, not(target_os = "macos"))))]
+            { let _ = (&be, n.show()); }
+        });
+    }
+    /// Bring the window forward on a session (from a notification or the fleet view).
+    pub fn jump_to(&mut self, id: u64) {
+        self.last_alert = None;
+        if !self.sessions.contains_key(&id) { return; }
+        self.fleet = None;
+        self.show(id);
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
     pub fn flash(&self) { if !self.win_focused { self.ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational)); } }
 
@@ -312,6 +351,9 @@ impl App {
             Ok("composer") => self.open_composer(None),
             Ok("workspaces") => self.open_workspaces(),
             Ok("menu") => self.machine_menu(egui::pos2(240.0, 90.0), "linux"),
+            Ok("fleet") => self.open_fleet(),
+            Ok("prompts") => self.open_picker(overlays::PalSource::Prompts, ""),
+            Ok("replay") => { if let Some(m) = self.cfg.machines.iter().find(|m| m.is_ssh()).map(|m| m.id.clone()) { self.be.run(async { tokio::time::sleep(std::time::Duration::from_millis(1500)).await }, move |app, ()| app.open_replay(&m)); } }
             _ => {}
         }
         self.be.sync_mcp();
@@ -367,6 +409,29 @@ impl App {
                     Err(e) => { app.toast_bad(format!("{e}. Opening the release page instead.")); crate::platform::open_external(&url); }
                 });
             }));
+        } else if crate::backend::installer_name(&version, std::env::consts::OS, std::env::consts::ARCH).is_some() {
+            // macOS: the verified disk image is opened for you to drag across. Linux: the verified .deb is installed
+            // through the system's password prompt when Nexus itself came from a .deb; otherwise it is left in Downloads.
+            let v = version.clone();
+            self.toast_action(format!("Nexus {version} is available."), 60_000, "Download", act(move |app| {
+                app.toast_ok(format!("Downloading Nexus {v}…"));
+                let (be, v2, url) = (app.be.clone(), v.clone(), url.clone());
+                app.be.run(async move { be.download_update(v2).await }, move |app, r| match r {
+                    Err(e) => { app.toast_bad(format!("{e}. Opening the release page instead.")); crate::platform::open_external(&url); }
+                    Ok(path) if IS_MAC => { let _ = open::that_detached(&path); app.toast(format!("Downloaded and checked {}. Quit Nexus, then drag the new one into Applications.", path.display()), OK, 30_000); }
+                    Ok(path) => {
+                        let from_deb = std::env::current_exe().is_ok_and(|p| p.starts_with("/usr/bin"));
+                        if !from_deb { app.toast(format!("Downloaded and checked {}", path.display()), OK, 30_000); return; }
+                        app.toast_action("The update is downloaded and checked.", 600_000, "Install", act(move |app| {
+                            let (be, path) = (app.be.clone(), path.clone());
+                            app.be.run(async move { be.install_deb(path).await }, |app, r| match r {
+                                Ok(()) => app.toast("Updated. Restart Nexus to use the new version.", OK, 60_000),
+                                Err(e) => app.toast_bad(e),
+                            });
+                        }));
+                    }
+                });
+            }));
         } else {
             self.toast_action(format!("Nexus {version} is available."), 60_000, "Download", act(move |_| { crate::platform::open_external(&url); }));
         }
@@ -417,7 +482,13 @@ impl App {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.win_focused = ctx.input(|i| i.focused);
+        let focused = ctx.input(|i| i.focused);
+        // Windows and macOS don't say that a notification was clicked: coming back to Nexus within 20 s of one is
+        // taken as that click.
+        if focused && !self.win_focused && cfg!(any(windows, target_os = "macos")) {
+            if let Some((id, at)) = self.last_alert.take() { if now_ms() - at < 20_000 && !self.overlay_open() { self.jump_to(id); } }
+        }
+        self.win_focused = focused;
         self.drain();
         self.tick();
         if ctx.input(|i| i.viewport().close_requested()) {
@@ -438,6 +509,7 @@ impl eframe::App for App {
         self.draw_sidebar(ui);
         self.draw_team(ui);
         self.draw_composer(ui);
+        self.replay_tick();
         egui::CentralPanel::default().frame(egui::Frame::new().fill(BG)).show(ui, |ui| {
             if self.ordered().is_empty() { self.draw_welcome(ui); } else { self.draw_panes(ui); }
         });
@@ -506,6 +578,11 @@ const ICONS: &[(&str, &str)] = &[
     ("layout2", r#"<rect x="3.5" y="4" width="7" height="16" rx="2.4"/><rect x="13.5" y="4" width="7" height="16" rx="2.4"/>"#),
     ("layout4", r#"<rect x="3.5" y="3.5" width="7" height="7" rx="2"/><rect x="13.5" y="3.5" width="7" height="7" rx="2"/><rect x="3.5" y="13.5" width="7" height="7" rx="2"/><rect x="13.5" y="13.5" width="7" height="7" rx="2"/>"#),
     ("shell", r#"<path d="M5 7l5 5-5 5M12.5 18H19"/>"#),
+    ("inbox", r#"<path d="M4 13l2.5-8h11L20 13v6H4zM4 13h5l1 2.5h4l1-2.5h5"/>"#),
+    ("play", r#"<path d="M7 5l12 7-12 7z"/>"#),
+    ("pause", r#"<path d="M8 5v14M16 5v14"/>"#),
+    ("branch", r#"<circle cx="7" cy="5" r="2"/><circle cx="7" cy="19" r="2"/><circle cx="17" cy="8" r="2"/><path d="M7 7v10M17 10c0 5-10 2-10 7"/>"#),
+    ("book", r#"<path d="M5 4h11a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3zM5 17a3 3 0 0 1 3-3h11"/>"#),
 ];
 pub fn icon_src(name: &str) -> egui::ImageSource<'static> {
     static CACHE: std::sync::LazyLock<HashMap<&'static str, (String, &'static [u8])>> = std::sync::LazyLock::new(|| {

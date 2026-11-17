@@ -21,6 +21,8 @@ path = "src/bin/nexus-mcp.rs"
 
 [dependencies]
 eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+# Colour glyphs (emoji) in the terminal and UI text.
+epaint = { version = "0.37", default-features = false, features = ["color_fonts"] }
 egui_extras = { version = "0.37", default-features = false, features = ["svg", "image"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 alacritty_terminal = "0.26"

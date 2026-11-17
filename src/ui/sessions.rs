@@ -56,6 +56,8 @@ pub struct Session {
     pending_input: Vec<u8>,
     pending_at: Option<i64>,
     pub agent: Option<AgentStatus>,
+    /// Why it is waiting (what the bell, hook or notification said), for the fleet view.
+    pub why: Option<String>,
     pub search: Option<String>,
     pub search_focus: bool,
     /// Wheel movement not yet turned into whole lines.
@@ -89,7 +91,7 @@ impl App {
             read_only: extra.read_only, announce, spec: extra, pid: None, status: SessStatus::Starting, activity: Activity::Idle, title: String::new(),
             term: Terminal::new(self.last_cells.0, self.last_cells.1),
             last_data: 0, last_input: 0, last_pointer: 0, burst: 0, quiet_until: 0, busy_since: 0, prompt_line: None, retry: 0, retry_at: None, pending_input: vec![], pending_at: None,
-            agent: None, search: None, search_focus: false, scroll_acc: 0.0, mouse_cell: None, click: (0, (0, 0), 0),
+            agent: None, why: None, search: None, search_focus: false, scroll_acc: 0.0, mouse_cell: None, click: (0, (0, 0), 0),
         };
         self.sessions.insert(id, s);
         self.order.push(id);
@@ -271,15 +273,19 @@ impl App {
     fn mark_done(&mut self, id: u64, notify: bool, body: Option<String>) {
         let Some(s) = self.sessions.get_mut(&id) else { return };
         s.activity = Activity::Done;
+        s.why = body.clone().filter(|b| !b.is_empty());
         if notify && self.cfg.appearance.notify_when_done {
             let (name, title, mid) = (s.name.clone(), s.title.clone(), s.machine_id.clone());
             let body = body.filter(|b| !b.is_empty()).unwrap_or(if title.is_empty() { "Finished - waiting for you".into() } else { title });
-            self.notify(&format!("{name} on {} is ready", self.machine(&mid).name), &body);
+            let head = format!("{name} on {} is ready", self.machine(&mid).name);
+            self.notify(&head, &body, Some(id));
+            // The phone hears about it only while Nexus isn't in front of you.
+            if !self.win_focused { self.be.push(head, if self.cfg.push.include_text { body } else { "Waiting for you".into() }); }
             self.flash();
         }
     }
     pub fn clear_done(&mut self, id: u64) {
-        if let Some(s) = self.sessions.get_mut(&id) { if s.activity == Activity::Done { s.activity = Activity::Idle; s.agent = None; } }
+        if let Some(s) = self.sessions.get_mut(&id) { if s.activity == Activity::Done { s.activity = Activity::Idle; s.agent = None; s.why = None; } }
     }
     pub(super) fn activity_tick(&mut self) {
         let t = now_ms();
@@ -679,6 +685,7 @@ impl App {
             let mut det: Vec<TmuxSession> = p.sessions.into_iter().filter(|x| x.name.starts_with("nx-")).collect();
             det.sort_by_key(|x| std::cmp::Reverse(x.activity));
             st.detached = det.clone();
+            app.refresh_agents(&id);
             app.ensure_hub();
             if app.auto_reattached.insert(id.clone()) && app.cfg.appearance.restore_session {
                 let open: HashSet<String> = app.sessions.values().filter_map(|s| s.tmux_name.clone()).collect();
@@ -698,6 +705,33 @@ impl App {
         // A machine that was online and dropped (Wi-Fi, reboot) is retried in the background.
         if was == Some(Status::Online) && matches!(status, Status::Offline | Status::Error) { self.schedule_machine_retry(id); }
     }
+    /// What the agents on a machine last reported (also for sessions that aren't open here): the fleet view's data.
+    pub fn refresh_agents(&mut self, id: &str) {
+        let (be, mid) = (self.be.clone(), id.to_string());
+        let mid2 = mid.clone();
+        self.be.run(async move { be.agent_statuses(&mid).await }, move |app, map| { app.ms(&mid2).agents = map; });
+    }
+    /// Launch an agent in its own git worktree: pick the repository folder, name the branch, start there.
+    pub fn launch_in_worktree(&mut self, machine_id: &str, preset_id: &str, cwd: &str) {
+        let (mid, pid, cwd) = (machine_id.to_string(), preset_id.to_string(), cwd.to_string());
+        let t = crate::remote::radix36(now_ms() as u64);
+        let suggestion = format!("nexus/{preset_id}-{}", &t[t.len().saturating_sub(4)..]);
+        self.prompt("New git worktree", &format!("A separate working folder and branch for this agent, beside the repository ({}-worktrees/<branch>), so agents working on the same project can't overwrite each other's files. An existing branch is checked out instead of created.", crate::util::base_name(&cwd)),
+            "Branch", "feature/login", &suggestion, false, move |app, branch| {
+                let Some(branch) = branch.map(|b| b.trim().to_string()) else { return };
+                if !crate::remote::valid_branch(&branch) { app.toast_warn("Branch names use letters, digits, . _ - and /"); return; }
+                let (be, mid2, cwd2, b2) = (app.be.clone(), mid.clone(), cwd.clone(), branch.clone());
+                let (mid3, pid3) = (mid.clone(), pid.clone());
+                app.be.run(async move { be.add_worktree(&mid2, cwd2, b2).await }, move |app, r| match r {
+                    Err(e) => app.toast_bad(format!("Couldn't create the worktree: {e}")),
+                    Ok(path) => {
+                        app.toast_ok(format!("Worktree {branch} is at {path}"));
+                        app.launch(&mid3, &pid3, Extra { cwd: Some(path), name: Some(format!("{} · {branch}", app.preset(&pid3).name)), ..Default::default() });
+                    }
+                });
+            });
+    }
+
     pub fn disconnect_machine(&mut self, id: &str) { self.manual_disconnect.insert(id.to_string()); self.be.disconnect(id); }
 
     pub(super) fn periodic_refresh(&mut self) {

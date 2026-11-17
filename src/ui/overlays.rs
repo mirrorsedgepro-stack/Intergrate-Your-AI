@@ -20,7 +20,7 @@ pub struct PalItem {
     pub run: Act,
 }
 #[derive(Clone, PartialEq)]
-pub enum PalSource { Main, Workspaces, Folder { machine_id: String, preset_id: String }, Queue }
+pub enum PalSource { Main, Workspaces, Folder { machine_id: String, preset_id: String, worktree: bool }, Queue, Prompts }
 pub struct Palette { input: String, sel: usize, source: PalSource, focus: bool, scroll: bool }
 
 // ---------------------------------------------------------------- dialogs
@@ -41,8 +41,8 @@ impl MenuItem {
     pub fn disabled(mut self, d: bool) -> Self { if let Self::Item { disabled, .. } = &mut self { *disabled = d; } self }
 }
 
-fn modal_frame() -> egui::Frame { egui::Frame::new().fill(PANEL).stroke(egui::Stroke::new(1.0, LINE2)).corner_radius(12).inner_margin(16) }
-fn section(ui: &mut egui::Ui, title: &str) { ui.add_space(10.0); ui.label(RichText::new(title.to_uppercase()).size(10.5).color(TEXT3).strong()); ui.add_space(2.0); }
+pub(super) fn modal_frame() -> egui::Frame { egui::Frame::new().fill(PANEL).stroke(egui::Stroke::new(1.0, LINE2)).corner_radius(12).inner_margin(16) }
+pub(super) fn section(ui: &mut egui::Ui, title: &str) { ui.add_space(10.0); ui.label(RichText::new(title.to_uppercase()).size(10.5).color(TEXT3).strong()); ui.add_space(2.0); }
 fn field(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) { ui.vertical(|ui| { ui.label(RichText::new(label).size(11.0).color(TEXT2)); add(ui); }); }
 
 impl App {
@@ -52,7 +52,7 @@ impl App {
         let Some(f) = self.ctx.memory(|m| m.focused()) else { return false };
         f == egui::Id::unique("composer-text") || f == egui::Id::unique("team-input") || self.panes.iter().flatten().any(|id| f == egui::Id::unique(("search", *id)))
     }
-    pub fn overlay_open(&self) -> bool { !self.dialogs.is_empty() || self.palette.is_some() || self.settings.is_some() || self.share.is_some() }
+    pub fn overlay_open(&self) -> bool { !self.dialogs.is_empty() || self.palette.is_some() || self.settings.is_some() || self.share.is_some() || self.fleet.is_some() || self.replay.is_some() }
 
     // ---------------------------------------------------------------- dialogs
     pub fn choose(&mut self, title: &str, desc: &str, options: &[(&str, bool)], on: impl FnOnce(&mut App, Option<usize>) + 'static) {
@@ -113,10 +113,13 @@ impl App {
     pub fn open_workspaces(&mut self) { self.open_picker(PalSource::Workspaces, ""); }
 
     /// Launch in a project folder: recent folders, git projects and top-level folders on that machine, or any typed path.
-    pub fn launch_in_folder(&mut self, machine_id: &str, preset_id: &str) {
+    pub fn launch_in_folder(&mut self, machine_id: &str, preset_id: &str) { self.pick_launch_folder(machine_id, preset_id, false); }
+    /// Like launch_in_folder, but the agent gets its own git worktree of the chosen repository.
+    pub fn launch_worktree(&mut self, machine_id: &str, preset_id: &str) { self.pick_launch_folder(machine_id, preset_id, true); }
+    fn pick_launch_folder(&mut self, machine_id: &str, preset_id: &str, worktree: bool) {
         let m = self.machine(machine_id);
         if m.is_ssh() && m.host.is_empty() && m.ts_host.is_empty() { self.open_settings(); return; }
-        self.open_picker(PalSource::Folder { machine_id: machine_id.into(), preset_id: preset_id.into() }, "");
+        self.open_picker(PalSource::Folder { machine_id: machine_id.into(), preset_id: preset_id.into(), worktree }, "");
         if self.dir_cache.get(machine_id).is_some_and(|(at, _)| now_ms() - at < 60_000) { return; }
         let (be, mid) = (self.be.clone(), machine_id.to_string());
         let mid2 = mid.clone();
@@ -125,13 +128,37 @@ impl App {
             Err(e) => app.toast_bad(e),
         });
     }
-    fn pick_folder(&mut self, machine_id: &str, preset_id: &str, cwd: &str) {
+    fn pick_folder(&mut self, machine_id: &str, preset_id: &str, cwd: &str, worktree: bool) {
         let list = self.cfg.recent_dirs.entry(machine_id.to_string()).or_default();
         list.retain(|d| d != cwd);
         list.insert(0, cwd.to_string());
         list.truncate(12);
         self.save_now();
-        self.launch(machine_id, preset_id, Extra { cwd: Some(cwd.into()), ..Default::default() });
+        if worktree { self.launch_in_worktree(machine_id, preset_id, cwd); } else { self.launch(machine_id, preset_id, Extra { cwd: Some(cwd.into()), ..Default::default() }); }
+    }
+
+    // ---------------------------------------------------------------- prompt library
+    pub fn save_prompt(&mut self, text: String) {
+        if text.trim().is_empty() { self.toast_warn("Write the prompt first"); return; }
+        self.prompt("Save prompt", "Saved prompts are in the palette (type \"prompt\") and fill the broadcast box when picked.", "Name", "e.g. Review this branch", "", false, move |app, name| {
+            let Some(name) = name.map(|n| crate::util::clip(n.trim(), 60)) else { return };
+            app.cfg.prompts.retain(|p| p.name != name);
+            app.cfg.prompts.push(crate::config::SavedPrompt { name: name.clone(), text: text.clone() });
+            app.save_now();
+            app.toast_ok(format!("Saved prompt \"{name}\""));
+        });
+    }
+    fn delete_prompt(&mut self, name: &str) {
+        self.cfg.prompts.retain(|p| p.name != name);
+        self.save_now();
+        self.toast(format!("Deleted prompt \"{name}\""), TEXT2, 3800);
+    }
+    fn prompt_items(&self, group: &'static str, items: &mut Vec<PalItem>) {
+        for p in &self.cfg.prompts {
+            let text = p.text.clone();
+            let sub = crate::util::clip(&p.text.split_whitespace().collect::<Vec<_>>().join(" "), 90);
+            items.push(PalItem { group, label: format!("Prompt: {}", p.name), sub, kbd: String::new(), icon: Icon::Glyph("book"), color: None, missing: false, exact: false, run: act(move |app| app.open_composer(Some(text.clone()))) });
+        }
     }
 
     fn palette_items(&self, source: &PalSource) -> (String, Vec<PalItem>) {
@@ -152,17 +179,24 @@ impl App {
                 for w in ws { let name = w.name.clone().unwrap_or_default(); let n2 = name.clone(); items.push(item("Manage", format!("Delete workspace \"{name}\""), String::new(), "", Icon::Glyph("trash"), None, act(move |app| app.delete_workspace(&n2)))); }
                 return (if ws.is_empty() { "No workspaces yet. Arrange your panes, then save one".into() } else { "Open a workspace…".into() }, items);
             }
-            PalSource::Folder { machine_id, preset_id } => {
+            PalSource::Prompts => {
+                self.prompt_items("Prompts", &mut items);
+                for p in &self.cfg.prompts { let n = p.name.clone(); items.push(item("Manage", format!("Delete prompt \"{}\"", p.name), String::new(), "", Icon::Glyph("trash"), None, act(move |app| app.delete_prompt(&n)))); }
+                return (if self.cfg.prompts.is_empty() { "No saved prompts yet. Write one in the broadcast box and choose \"Save as prompt\"".into() } else { "Pick a prompt to put in the broadcast box…".into() }, items);
+            }
+            PalSource::Folder { machine_id, preset_id, worktree } => {
                 let (m, p) = (self.machine(machine_id), self.preset(preset_id));
+                let wt = *worktree;
                 let mut seen = HashSet::new();
                 let mut add = |items: &mut Vec<PalItem>, group, d: &str| {
                     if !seen.insert(d.to_string()) { return; }
                     let (mid, pid, dir) = (machine_id.clone(), preset_id.clone(), d.to_string());
-                    items.push(item(group, d.to_string(), String::new(), "", Icon::Glyph("folder"), None, act(move |app| app.pick_folder(&mid, &pid, &dir))));
+                    items.push(item(group, d.to_string(), String::new(), "", Icon::Glyph(if wt { "branch" } else { "folder" }), None, act(move |app| app.pick_folder(&mid, &pid, &dir, wt))));
                 };
                 for d in self.cfg.recent_dirs.get(machine_id).into_iter().flatten() { add(&mut items, "Recent", d); }
                 let data = self.dir_cache.get(machine_id).map(|x| x.1.clone()).unwrap_or_default();
                 for d in &data.repos { add(&mut items, "Projects (git)", d); }
+                if wt { return (format!("Repository to branch off for {} on {}. Type a path and press Enter to use it", p.name, m.name), items); }
                 add(&mut items, "Folders", "~");
                 for d in &data.dirs { add(&mut items, "Folders", d); }
                 return (format!("Folder for {} on {}. Type a path and press Enter to use it", p.name, m.name), items);
@@ -187,6 +221,13 @@ impl App {
                 }
             }
         }
+        for m in &ms {
+            for p in self.cfg.presets_for(m).filter(|p| is_agent(&p.id)) {
+                let (mid, pid) = (m.id.clone(), p.id.clone());
+                items.push(item("Launch in a new git worktree", format!("{} in a new worktree…", p.name), format!("on {}", m.name), "", Icon::Preset(p.id.clone(), Some(m.id.clone())), Some(hex(&p.color)), act(move |app| app.launch_worktree(&mid, &pid))));
+            }
+        }
+        self.prompt_items("Prompts", &mut items);
         for w in &self.cfg.workspaces {
             let snap = w.clone();
             items.push(item("Workspaces", format!("Open workspace {}", w.name.clone().unwrap_or_default()), format!("{} sessions", w.sessions.len()), "", Icon::Glyph("layout"), None, act(move |app| app.open_layout(&snap, false))));
@@ -203,7 +244,9 @@ impl App {
         cmd("Layout: single", "", "layout", act(|a| a.set_layout(1)));
         cmd("Layout: side by side", "", "layout", act(|a| a.set_layout(2)));
         cmd("Layout: grid of four", "", "layout", act(|a| a.set_layout(4)));
+        cmd("Fleet: every agent, and the ones waiting for you", "Ctrl+Shift+A", "inbox", act(App::open_fleet));
         cmd("Broadcast prompt to sessions", "Ctrl+Shift+Enter", "send", act(|a| a.open_composer(None)));
+        cmd("Prompt library…", "", "book", act(|a| a.open_picker(PalSource::Prompts, "")));
         cmd("Workspaces…", "Ctrl+Shift+O", "layout", act(App::open_workspaces));
         cmd("Share machines over Tailscale…", "", "people", act(App::open_share));
         cmd("Team chat", "Ctrl+Shift+M", "chat", act(|a| a.open_team(None)));
@@ -222,6 +265,8 @@ impl App {
             cmd(&format!("Set up SSH key for {}", m.name), "", "key", act(move |x| x.setup_key(&b)));
             cmd(&format!("Install tools on {} (tmux, Claude, Antigravity, OpenClaw)", m.name), "", "box", act(move |x| x.bootstrap(&c)));
             cmd(&format!("Enable Claude alerts on {}", m.name), "", "bell", act(move |x| x.enable_alerts(&d)));
+            let e = m.id.clone();
+            cmd(&format!("Replay recorded sessions on {}…", m.name), "", "play", act(move |x| x.open_replay(&e)));
         }
         ("Switch session, launch Claude / Antigravity / OpenClaw / Shell on any machine…".into(), items)
     }
@@ -230,9 +275,9 @@ impl App {
         let Some(mut pal) = self.palette.take() else { return };
         let (placeholder, mut src) = self.palette_items(&pal.source);
         let q = pal.input.trim().to_string();
-        if let (PalSource::Folder { machine_id, preset_id }, false) = (&pal.source, q.is_empty()) {
-            let (mid, pid, text) = (machine_id.clone(), preset_id.clone(), q.clone());
-            src.insert(0, PalItem { group: "Use", label: q.clone(), sub: "press Enter to use this path".into(), kbd: String::new(), icon: Icon::Glyph("folder"), color: None, missing: false, exact: true, run: act(move |app| app.pick_folder(&mid, &pid, &text)) });
+        if let (PalSource::Folder { machine_id, preset_id, worktree }, false) = (&pal.source, q.is_empty()) {
+            let (mid, pid, text, wt) = (machine_id.clone(), preset_id.clone(), q.clone(), *worktree);
+            src.insert(0, PalItem { group: "Use", label: q.clone(), sub: "press Enter to use this path".into(), kbd: String::new(), icon: Icon::Glyph("folder"), color: None, missing: false, exact: true, run: act(move |app| app.pick_folder(&mid, &pid, &text, wt)) });
         }
         let mut items: Vec<(PalItem, HashSet<usize>)> = if q.is_empty() { src.into_iter().map(|i| (i, HashSet::new())).collect() } else {
             let mut v: Vec<(f64, PalItem, HashSet<usize>)> = src.into_iter().filter_map(|it| {
@@ -271,7 +316,10 @@ impl App {
                 if std::mem::take(&mut pal.focus) || !r.has_focus() { r.request_focus(); }
                 if pal.input != before { pal.sel = 0; pal.scroll = true; }
                 ui.separator();
-                egui::ScrollArea::vertical().max_height((screen.height() - 220.0).clamp(120.0, 460.0)).show(ui, |ui| {
+                let list_h = (screen.height() - 220.0).clamp(120.0, 460.0);
+                // A floating window keeps its first frame's height and a scroll area won't outgrow that by itself:
+                // min_scrolled_height lets a list that fills in later (folders arriving from a machine) grow.
+                egui::ScrollArea::vertical().max_height(list_h).min_scrolled_height(list_h).show(ui, |ui| {
                     if items.is_empty() { ui.add_space(14.0); ui.vertical_centered(|ui| ui.label(dim("No matches"))); ui.add_space(14.0); }
                     let mut last_group = "";
                     for (i, (it, hits)) in items.iter().enumerate() {
@@ -347,7 +395,7 @@ impl App {
         let Some(mut c) = self.composer.take() else { return };
         let live: Vec<u64> = self.ordered().into_iter().filter(|id| self.sessions[id].status == SessStatus::Running).collect();
         self.targets.retain(|id| live.contains(id));
-        let (mut send, mut close) = (false, false);
+        let (mut send, mut close, mut library, mut save) = (false, false, false, false);
         egui::Panel::bottom("composer").frame(egui::Frame::new().fill(PANEL).inner_margin(10)).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("Broadcast prompt").strong());
@@ -372,11 +420,15 @@ impl App {
             if std::mem::take(&mut c.focus) { r.request_focus(); }
             ui.horizontal(|ui| {
                 ui.checkbox(&mut c.submit, "Press Enter after sending");
+                if icon_text_btn(ui, "book", "Prompts", false).on_hover_text("Fill this box from a saved prompt").clicked() { library = true; }
+                if icon_text_btn(ui, "save", "Save as prompt", false).on_hover_text("Keep this text in the prompt library").clicked() { save = true; }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { if primary_btn(ui, "Send").clicked() { send = true; } key_hint(ui, "Ctrl+Enter"); });
             });
         });
+        let text = c.text.clone();
         self.composer = Some(c);
         if send { self.send_composer(); } else if close { self.close_composer(); }
+        else if library { self.open_picker(PalSource::Prompts, ""); } else if save { self.save_prompt(text); }
     }
 
     // ---------------------------------------------------------------- team presets
@@ -415,6 +467,7 @@ impl App {
         self.cfg.appearance = d.appearance;
         self.cfg.offline = d.offline;
         self.cfg.mcp = d.mcp;
+        self.cfg.push = crate::config::PushCfg { url: d.push.url.trim().to_string(), ..d.push };
         let (client, status) = (self.cfg.collab.client.clone(), self.cfg.collab.status.clone());
         self.cfg.collab = crate::config::CollabCfg { client, status, ..d.collab };
         self.save_now();
@@ -424,14 +477,14 @@ impl App {
     }
     fn draw_settings(&mut self) {
         let Some(mut st) = self.settings.take() else { return };
-        enum Do { None, Save, Cancel, OpenFile, Add, Remove(usize), Test(String), Key(String), Bootstrap(String), Alerts(String) }
+        enum Do { None, Save, Cancel, OpenFile, Add, Remove(usize), Test(String), Key(String), Bootstrap(String), Alerts(String), PushTest(String) }
         let mut todo = Do::None;
         let esc = self.dialogs.is_empty() && self.ctx.input(|i| i.key_pressed(Key::Escape));
         let screen = self.ctx.content_rect();
         egui::Modal::new(egui::Id::unique("settings")).frame(modal_frame()).show(&self.ctx, |ui| {
             ui.set_width(760.0f32.min(screen.width() - 60.0));
             ui.horizontal(|ui| { ui.label(RichText::new("Settings").size(16.0).strong()); ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { if icon_btn(ui, "x", "Close").clicked() { todo = Do::Cancel; } }); });
-            egui::ScrollArea::vertical().max_height(screen.height() - 190.0).show(ui, |ui| {
+            egui::ScrollArea::vertical().max_height(screen.height() - 190.0).min_scrolled_height((screen.height() - 190.0).max(120.0)).show(ui, |ui| {
                 section(ui, "Machines");
                 let ssh_count = st.draft.machines.iter().filter(|m| m.is_ssh()).count();
                 for (idx, m) in st.draft.machines.iter_mut().enumerate() {
@@ -501,6 +554,13 @@ impl App {
                 ui.checkbox(&mut d.appearance.copy_on_select, "Copy on select");
                 ui.checkbox(&mut d.appearance.notify_when_done, "Notify when a background agent finishes");
                 ui.checkbox(&mut d.collab.announce, "Post in team chat when I start an agent on a shared machine");
+                field(ui, "Phone alerts: an ntfy topic address (ntfy.sh or your own server). Told when an agent finishes or needs you while Nexus isn't in front. Anyone who knows the address can read the alerts, so pick a long random topic.", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut d.push.url).hint_text("https://ntfy.sh/nexus-7f3k2m9x1q").font(egui::TextStyle::Monospace).desired_width(420.0));
+                        if ui.add_enabled(!d.push.url.trim().is_empty(), egui::Button::new("Send a test")).clicked() { todo = Do::PushTest(d.push.url.trim().to_string()); }
+                    });
+                });
+                if !d.push.url.trim().is_empty() { ui.checkbox(&mut d.push.include_text, "Include what the agent said in phone alerts (off: only which session is waiting)"); }
                 ui.checkbox(&mut d.appearance.restore_session, "Restore sessions, layout and folders when Nexus starts");
                 ui.checkbox(&mut d.appearance.record_sessions, "Record remote sessions to ~/.nexus/logs on the machine (audit trail; kept 30 days)");
                 ui.checkbox(&mut d.mcp.enabled, "Let MCP clients on this PC control Nexus (list machines, launch agents, send text, read output)");
@@ -546,6 +606,10 @@ impl App {
             Do::Key(id) => if needs_host(self, &id) { self.close_settings(); self.setup_key(&id); },
             Do::Bootstrap(id) => if needs_host(self, &id) { self.close_settings(); self.bootstrap(&id); },
             Do::Alerts(id) => if needs_host(self, &id) { self.enable_alerts(&id); },
+            Do::PushTest(url) => {
+                let be = self.be.clone();
+                self.be.run(async move { be.push_test(url).await }, |app, r| match r { Ok(()) => app.toast_ok("Sent. It should reach your phone in a moment."), Err(e) => app.toast_bad(format!("Couldn't send: {e}")) });
+            }
         }
     }
 
@@ -596,6 +660,8 @@ impl App {
     pub(super) fn draw_overlays(&mut self) {
         self.draw_settings();
         self.draw_share();
+        self.draw_fleet();
+        self.draw_replay();
         self.draw_palette();
         self.draw_dialog();
         self.draw_menu();
@@ -637,6 +703,7 @@ impl App {
             Key::S if c && sh => { if let Some(id) = self.focused() { self.send_last_reply(id); } }
             Key::O if c && sh => self.open_workspaces(),
             Key::M if c && sh => self.toggle_team(),
+            Key::A if c && sh => self.open_fleet(),
             Key::N if c && sh => self.open_palette("in folder "),
             Key::Num1 | Key::Num2 | Key::Num3 | Key::Num4 | Key::Num5 | Key::Num6 | Key::Num7 | Key::Num8 | Key::Num9 if c && !sh && !a => {
                 let n = key.name().parse::<usize>().unwrap_or(1);
@@ -679,6 +746,8 @@ impl App {
                     if (m.alt && !m.ctrl && !IS_MAC) || (m.command && !m.alt) { continue; }
                     if let Some(id) = target { self.input(id, t.as_bytes()); }
                 }
+                egui::Event::Ime(egui::ImeEvent::Commit(t)) if !text_focus => { self.preedit.clear(); if let Some(id) = target { self.input(id, t.as_bytes()); } }
+                egui::Event::Ime(egui::ImeEvent::Preedit { text, .. }) if !text_focus => self.preedit = text,
                 // Ctrl+C copies when text is selected, otherwise it interrupts (on macOS Ctrl+C is always the terminal's).
                 egui::Event::Copy if !text_focus => { if let Some(id) = target { if !self.copy_selection(id) && !IS_MAC { self.input(id, b"\x03"); } } }
                 egui::Event::Cut if !text_focus && !IS_MAC => { if let Some(id) = target { self.input(id, b"\x18"); } }

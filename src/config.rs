@@ -180,6 +180,23 @@ pub struct CollabCfg {
 #[serde(default)]
 pub struct McpCfg { pub enabled: bool }
 
+/// A saved prompt (the prompt library): picked from the palette, it fills the broadcast composer.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct SavedPrompt { pub name: String, pub text: String }
+
+/// Phone alerts: an ntfy topic address (https://ntfy.sh/<topic> or your own server) that is told when an agent
+/// finishes or needs you while Nexus isn't in front.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PushCfg {
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub url: String,
+    /// Also send what the agent said (off: only which session is waiting).
+    pub include_text: bool,
+}
+impl PushCfg { pub fn is_default(&self) -> bool { *self == Self::default() } }
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Config {
@@ -202,6 +219,10 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tailscale: Option<TailscaleCfg>,
     pub collab: CollabCfg,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub prompts: Vec<SavedPrompt>,
+    #[serde(skip_serializing_if = "PushCfg::is_default")]
+    pub push: PushCfg,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -238,6 +259,8 @@ impl Default for Config {
             window: None,
             tailscale: None,
             collab: CollabCfg { announce: true, ..Default::default() },
+            prompts: vec![],
+            push: PushCfg::default(),
             extra: Map::new(),
         }
     }

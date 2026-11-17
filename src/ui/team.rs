@@ -99,7 +99,7 @@ impl App {
         let fresh = now_ms() - m.ts < 60_000;
         if !mine && fresh && m.kind != "activity" {
             if !self.team.open { self.team.unread += 1; }
-            if mentions(&m.text, &self.my_name()) { self.notify(&format!("{} mentioned you", m.from.name), &crate::util::clip(&m.text, 200)); self.flash(); }
+            if mentions(&m.text, &self.my_name()) { self.notify(&format!("{} mentioned you", m.from.name), &crate::util::clip(&m.text, 200), None); self.flash(); }
         }
         self.team.messages.push(m);
         let n = self.team.messages.len();
@@ -209,7 +209,7 @@ impl App {
             let Some(i) = self.queue.iter().position(|q| q.id == id) else { continue };
             let q = self.queue.remove(i);
             let (m, p) = (self.machine(&q.machine_id), self.preset(&q.preset_id));
-            self.notify(&format!("{} is free", m.name), &format!("Starting {}{}", p.name, q.extra.cwd.as_ref().map(|c| format!(" in {c}")).unwrap_or_default()));
+            self.notify(&format!("{} is free", m.name), &format!("Starting {}{}", p.name, q.extra.cwd.as_ref().map(|c| format!(" in {c}")).unwrap_or_default()), None);
             self.toast(format!("{} is free: starting {}", m.name, p.name), OK, 5000);
             self.launch(&q.machine_id, &q.preset_id, Extra { queued: true, ..q.extra });
         }

@@ -43,6 +43,10 @@ impl App {
                     }
                     ui.add_space(6.0);
                     if icon_btn(ui, "search", "Command palette (Ctrl+Shift+P)").clicked() { todo.push(act(|a| a.open_palette(""))); }
+                    let waiting = self.waiting_count();
+                    let r = icon_btn_c(ui, "inbox", "Fleet: every agent, and the ones waiting for you (Ctrl+Shift+A)", if waiting > 0 { WARN } else { TEXT2 }, 15.0);
+                    if waiting > 0 { ui.painter().text(r.rect.right_top() + Vec2::new(-2.0, 3.0), egui::Align2::CENTER_CENTER, if waiting > 9 { "9+".to_string() } else { waiting.to_string() }, FontId::proportional(9.5), WARN); }
+                    if r.clicked() { todo.push(act(App::open_fleet)); }
                     if icon_btn(ui, "layout", "Workspaces (Ctrl+Shift+O)").clicked() { todo.push(act(App::open_workspaces)); }
                     if icon_btn(ui, "people", "Share machines over Tailscale").clicked() { todo.push(act(App::open_share)); }
                     let r = icon_btn_c(ui, "chat", "Team chat (Ctrl+Shift+M)", if self.team.live { OK } else { TEXT2 }, 15.0);
@@ -92,7 +96,7 @@ impl App {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.available_width() < 520.0 { return; }
-                    for (k, what) in [("Ctrl+Shift+Enter", "broadcast"), ("Ctrl+Shift+O", "workspaces"), ("Ctrl+1-9", "switch"), ("Ctrl+Shift+P", "palette")] {
+                    for (k, what) in [("Ctrl+Shift+Enter", "broadcast"), ("Ctrl+Shift+A", "fleet"), ("Ctrl+1-9", "switch"), ("Ctrl+Shift+P", "palette")] {
                         ui.label(RichText::new(what).size(11.0).color(TEXT3));
                         key_hint(ui, k);
                         ui.add_space(4.0);
@@ -247,6 +251,7 @@ impl App {
             if let Some(e) = &g.error { meter(ui, "GPU", 0.0, "driver unavailable", e); }
             else {
                 meter(ui, "GPU", g.util.unwrap_or(0.0), &g.util.map_or("-".into(), |u| format!("{u:.0}%")), &g.name);
+                if let (Some(used), Some(total)) = (g.mem_used, g.mem_total.filter(|t| *t > 0.0)) { meter(ui, "VRAM", used / total * 100.0, &format!("{:.1}/{:.0} GB", used / 1024.0, total / 1024.0), "GPU memory in use"); }
                 if let Some(t) = g.temp { meter(ui, "TEMP", (t - 30.0) / 0.6, &format!("{t:.0}°C{}", g.power.map(|p| format!(" · {p:.0}W")).unwrap_or_default()), "GPU temperature / power"); }
             }
         }
@@ -275,6 +280,12 @@ impl App {
         items.push(MenuItem::Sep);
         items.push(MenuItem::Header("In a folder".into()));
         for p in self.cfg.presets_for(&m) { let (a, b) = (id.clone(), p.id.clone()); items.push(mi(format!("{} in folder…", p.name), act(move |x| x.launch_in_folder(&a, &b))).icon(Icon::Preset(p.id.clone(), Some(id.clone())))); }
+        let agents: Vec<&Preset> = self.cfg.presets_for(&m).filter(|p| super::sessions::is_agent(&p.id)).collect();
+        if !agents.is_empty() {
+            items.push(MenuItem::Sep);
+            items.push(MenuItem::Header("In a new git worktree".into()));
+            for p in agents { let (a, b) = (id.clone(), p.id.clone()); items.push(mi(format!("{} on its own branch…", p.name), act(move |x| x.launch_worktree(&a, &b))).icon(Icon::Glyph("branch"))); }
+        }
         if m.is_ssh() {
             items.push(MenuItem::Sep);
             let a = id.clone();
@@ -283,6 +294,8 @@ impl App {
             items.push(mi("Set up SSH key…", act(move |x| x.setup_key(&a))).icon(Icon::Glyph("key")));
             items.push(mi("Install tools (tmux, Claude, Antigravity, OpenClaw)…", act(move |x| x.bootstrap(&b))).icon(Icon::Glyph("box")));
             items.push(mi("Enable Claude alerts", act(move |x| x.enable_alerts(&c))).icon(Icon::Glyph("bell")));
+            let e = id.clone();
+            items.push(mi("Replay recorded sessions…", act(move |x| x.open_replay(&e))).icon(Icon::Glyph("play")));
             let name = m.name.clone();
             items.push(mi("Join Tailscale (sudo tailscale up --ssh)…", act(move |x| x.launch(&d, "shell", Extra { raw: true, cmd: Some("sudo tailscale up --ssh && tailscale status | head -5".into()), name: Some(format!("Tailscale → {name}")), ..Default::default() }))).icon(Icon::Glyph("plug")));
             items.push(mi("Share over Tailscale…", act(App::open_share)).icon(Icon::Glyph("people")));
@@ -350,6 +363,7 @@ impl App {
                 egui::Grid::new("keys").num_columns(2).spacing([16.0, 7.0]).show(ui, |ui| {
                     for (k, what) in [
                         ("Ctrl+Shift+P", "Command palette: launch or switch anything"), ("Ctrl+1…9", "Jump to session"), ("Ctrl+Shift+L", "Cycle layout: single, split, grid"),
+                        ("Ctrl+Shift+A", "Fleet: every agent at a glance, and answer the ones waiting for you"),
                         ("Ctrl+Shift+Enter", "Broadcast one prompt to many agents"), ("Ctrl+Shift+N", "Launch an agent in a project folder (or Shift+click a launcher)"),
                         ("Ctrl+Shift+O", "Workspaces: saved layouts of agents and folders"), ("Ctrl+Shift+S", "Send an agent's last reply to another agent"),
                         ("Ctrl+C / Ctrl+V", "Copy / paste text or screenshots; drop files onto a pane to attach them"),

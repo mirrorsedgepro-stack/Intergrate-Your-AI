@@ -195,6 +195,48 @@ fn connect_trust_exec_upload_forward_and_refusals() {
         r.machine.upload("~/.nexus/bootstrap.sh", "#!/bin/sh\necho boot\n").await.unwrap();
         assert_eq!(r.machine.exec("~/.nexus/bootstrap.sh", Stdin::None, T).await.unwrap().stdout, "boot\n");
 
+        // Fleet view: the hook reports of every Nexus session come back by session name (other files are ignored).
+        std::fs::create_dir_all(srv.home.join(".nexus/agent")).unwrap();
+        std::fs::write(srv.home.join(".nexus/agent/nx-claude-ab12.json"), r#"{"ts": 1700000000000, "event": "Notification", "message": "Claude needs your permission to use Bash", "summary": ""}"#).unwrap();
+        std::fs::write(srv.home.join(".nexus/agent/nx-claude-cd34.json"), "{\"ts\": 5, \"event\": \"Stop\",\n \"summary\": \"Done.\"}\n").unwrap();
+        std::fs::write(srv.home.join(".nexus/agent/pid-77.json"), "{}").unwrap();
+        std::fs::write(srv.home.join(".nexus/agent/nx-broken.json"), "not json").unwrap();
+        let agents = r.machine.agent_statuses().await;
+        assert_eq!(agents.len(), 2, "{agents:?}");
+        assert_eq!((agents["nx-claude-ab12"].event.as_str(), agents["nx-claude-ab12"].ts), ("Notification", 1_700_000_000_000));
+        assert_eq!(agents["nx-claude-cd34"].summary, "Done.");
+
+        // Replay: recordings are listed newest first and read back as they were written; nothing else can be read.
+        assert!(r.machine.list_logs().await.unwrap().is_empty());
+        std::fs::create_dir_all(srv.home.join(".nexus/logs")).unwrap();
+        let rec = "\x1b[1mhello\x1b[0m \u{1f600}\r\n".repeat(50);
+        std::fs::write(srv.home.join(".nexus/logs/nx-claude-ab12-20260101.log"), &rec).unwrap();
+        std::fs::write(srv.home.join(".nexus/logs/notes.txt"), "x").unwrap();
+        let logs = r.machine.list_logs().await.unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!((logs[0].name.as_str(), logs[0].size as usize), ("nx-claude-ab12-20260101.log", rec.len()));
+        assert_eq!(r.machine.read_log(&logs[0].name).await.unwrap(), rec.as_bytes());
+        for bad in ["../../etc/passwd", "a b.log", "", ".hidden", "x;id.log"] { assert!(r.machine.read_log(bad).await.is_err(), "{bad}"); }
+        assert!(r.machine.read_log("missing.log").await.is_err());
+
+        // Worktrees: a new branch in <repo>-worktrees/<branch> beside the repository, from any folder inside it.
+        if crate::platform::run_text({ let mut c = crate::platform::command("git"); c.arg("--version"); c }, T).contains("git version") {
+            let repo = srv.home.join("proj");
+            std::fs::create_dir_all(repo.join("src")).unwrap();
+            let sh = |cmd: &str| { let mut c = crate::platform::command("sh"); c.arg("-c").arg(cmd).current_dir(&repo); assert_eq!(crate::platform::run(c, None, T).code, 0, "{cmd}"); };
+            sh("git init -q . && git -c user.email=a@b -c user.name=t commit -q --allow-empty -m init");
+            let wt = r.machine.add_worktree("~/proj/src", "feature/login").await.unwrap();
+            assert!(wt.ends_with("/proj-worktrees/feature-login"), "{wt}");
+            assert!(std::path::Path::new(&wt).join(".git").exists());
+            sh("git rev-parse --verify -q feature/login >/dev/null");
+            // The same branch again can't be checked out twice; an existing branch elsewhere is checked out, not recreated.
+            assert!(r.machine.add_worktree("~/proj", "feature/login").await.is_err());
+            sh("git branch existing");
+            let wt2 = crate::local::add_worktree(&repo.to_string_lossy(), "existing").unwrap();
+            assert!(wt2.ends_with("proj-worktrees/existing") && std::path::Path::new(&wt2).join(".git").exists(), "{wt2}");
+            assert!(r.machine.add_worktree("~", "x").await.is_err(), "not a repository");
+        }
+
         // Port forwarding: bytes reach a listener on the "remote" side and come back.
         let echo = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let echo_port = echo.local_addr().unwrap().port();
@@ -402,5 +444,22 @@ fn local_sessions_run_report_exit_and_feed_the_mcp_tools() {
         let (pid2, _) = be.create_session(SessionSpec { machine_id: "local".into(), preset_id: "shell".into(), cols: 80, rows: 24, cmd: quiet, ..Default::default() }).await.unwrap();
         be.close(pid2, false);
         assert!(be.mcp_call(crate::mcp::Call::ListSessions).await.unwrap().as_array().unwrap().is_empty());
+    });
+}
+
+/// Not a test: keeps the in-process SSH server up so the app itself can be pointed at it (screenshots, hand checks).
+///   NEXUS_SERVE_SECS=60 NEXUS_SERVE_INFO=/tmp/serve.json cargo test serve_for_hand_checks -- --ignored
+/// The info file gets the port, the client key and the host-key pin for config.json's knownHosts.
+#[test]
+#[ignore]
+fn serve_for_hand_checks() {
+    runtime().block_on(async {
+        let srv = start_server("serve", None).await;
+        let r = rig(srv.port, srv.key_file.clone(), true);
+        r.machine.connect().await.unwrap();
+        let pin_key = format!("127.0.0.1:{}", srv.port);
+        let info = serde_json::json!({ "port": srv.port, "key": srv.key_file, "home": srv.home, "pinKey": pin_key, "pin": r.pins.known(&pin_key) });
+        std::fs::write(std::env::var("NEXUS_SERVE_INFO").unwrap_or("/tmp/nexus-serve.json".into()), info.to_string()).unwrap();
+        tokio::time::sleep(Duration::from_secs(std::env::var("NEXUS_SERVE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(60))).await;
     });
 }

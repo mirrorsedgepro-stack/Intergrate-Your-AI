@@ -205,7 +205,7 @@ impl App {
         egui::Modal::new(egui::Id::unique("share")).frame(egui::Frame::new().fill(PANEL).stroke(egui::Stroke::new(1.0, LINE2)).corner_radius(12).inner_margin(16)).show(&self.ctx, |ui| {
             ui.set_width(680.0f32.min(screen.width() - 60.0));
             ui.horizontal(|ui| { ui.label(RichText::new("Share your machines").size(16.0).strong()); ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { if icon_btn(ui, "x", "Close").clicked() { todo = Do::Close; } }); });
-            egui::ScrollArea::vertical().max_height(screen.height() - 150.0).show(ui, |ui| {
+            egui::ScrollArea::vertical().max_height(screen.height() - 150.0).min_scrolled_height((screen.height() - 150.0).max(120.0)).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if icon_text_btn(ui, "refresh", "Refresh", false).clicked() && !sh.busy { todo = Do::Refresh; }

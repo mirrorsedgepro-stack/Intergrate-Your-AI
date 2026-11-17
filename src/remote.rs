@@ -306,6 +306,33 @@ pub const DIRS_SCRIPT: &str = concat!(
 pub const PROBE_TOOLS: &str = "for t in tmux claude agy openclaw node git python3 nvidia-smi; do if command -v $t >/dev/null 2>&1; then echo \"tool:$t=1\"; else echo \"tool:$t=0\"; fi; done; ";
 
 fn os_user() -> String { std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_default() }
+#[derive(Clone, Debug)]
+pub struct LogFile { pub name: String, pub size: u64 }
+/// How much of a recording the replay viewer loads (the newest part).
+pub const LOG_MAX: usize = 6 * 1024 * 1024;
+const AGENTS_CMD: &str = r#"cd "$HOME"/.nexus/agent 2>/dev/null && for f in nx-*.json; do [ -f "$f" ] && { printf '%s\t' "${f%.json}"; tr -d '\n' < "$f"; echo; }; done; true"#;
+const LOGS_CMD: &str = r#"cd "$HOME"/.nexus/logs 2>/dev/null || exit 0; ls -t -- *.log 2>/dev/null | head -n 200 | while IFS= read -r f; do printf '%s\t%s\n' "$(wc -c < "$f" | tr -d ' ')" "$f"; done"#;
+
+pub fn parse_agent(json: &str) -> Option<AgentStatus> {
+    let r: serde_json::Value = serde_json::from_str(json).ok().filter(serde_json::Value::is_object)?;
+    let s = |k: &str, n: usize| crate::util::clip(r[k].as_str().unwrap_or_default(), n);
+    Some(AgentStatus { ts: r["ts"].as_f64().unwrap_or(0.0) as i64, event: s("event", 24), message: s("message", 300), summary: s("summary", 400) })
+}
+
+/// A branch name git accepts and that is safe to use as a folder name.
+pub fn valid_branch(b: &str) -> bool {
+    !b.is_empty() && b.len() <= 80 && b.chars().all(|c| c.is_ascii_alphanumeric() || "._/-".contains(c)) && !b.starts_with(['-', '/', '.']) && !b.ends_with(['/', '.']) && !b.contains("..") && !b.contains("//") && !b.ends_with(".lock")
+}
+pub fn worktree_slug(branch: &str) -> String { branch.replace('/', "-") }
+/// Shell script (POSIX) that adds a worktree for `branch` (created if new) in <repo>-worktrees/<branch> beside the
+/// repository holding `cwd`, and prints the new folder.
+pub fn worktree_script(cwd: &str, branch: &str) -> String {
+    format!(
+        "set -e; cd {}; top=$(git rev-parse --show-toplevel); dest=\"$(dirname \"$top\")/$(basename \"$top\")-worktrees/\"{}; mkdir -p \"$(dirname \"$dest\")\"; \
+         git worktree add -b {b} \"$dest\" >/dev/null 2>&1 || git worktree add \"$dest\" {b} >/dev/null; printf '%s' \"$dest\"",
+        sh_path(cwd), shq(&worktree_slug(branch)), b = shq(branch))
+}
+
 fn safe_name(s: &str, keep: &str) -> String { s.chars().map(|c| if c.is_ascii_alphanumeric() || keep.contains(c) { c } else { '_' }).collect() }
 
 struct Hop { host: String, port: u16, user: String, address: String, sc: HostConfig }
@@ -629,9 +656,31 @@ impl Machine {
     /// What the agent in this tmux session last reported through its hooks (see HOOK_SH), or None.
     pub async fn agent_status(&self, tmux_name: &str) -> Option<AgentStatus> {
         let out = self.sh(&format!("cat \"$HOME\"/.nexus/agent/{}.json 2>/dev/null", shq(&safe_name(tmux_name, "._-"))), 5).await.ok()?;
-        let r: serde_json::Value = serde_json::from_str(&out.stdout).ok().filter(serde_json::Value::is_object)?;
-        let s = |k: &str, n: usize| crate::util::clip(r[k].as_str().unwrap_or_default(), n);
-        Some(AgentStatus { ts: r["ts"].as_f64().unwrap_or(0.0) as i64, event: s("event", 24), message: s("message", 300), summary: s("summary", 400) })
+        parse_agent(&out.stdout)
+    }
+    /// The last hook report of every Nexus tmux session on this machine (open here or not), by session name.
+    pub async fn agent_statuses(&self) -> HashMap<String, AgentStatus> {
+        let Ok(out) = self.sh(AGENTS_CMD, 8).await else { return HashMap::new() };
+        out.stdout.lines().filter_map(|l| { let (name, json) = l.split_once('\t')?; Some((name.to_string(), parse_agent(json)?)) }).collect()
+    }
+
+    /// Recorded sessions (~/.nexus/logs), newest first.
+    pub async fn list_logs(&self) -> Result<Vec<LogFile>, String> {
+        let out = self.sh(LOGS_CMD, 20).await?;
+        Ok(out.stdout.lines().filter_map(|l| { let (size, name) = l.split_once('\t')?; Some(LogFile { name: name.to_string(), size: size.trim().parse().ok()? }) }).collect())
+    }
+    /// The (end of a) recording: what the pane printed, escape codes included.
+    pub async fn read_log(&self, name: &str) -> Result<Vec<u8>, String> {
+        if name.is_empty() || name.starts_with('.') || name != safe_name(name, "._-") { return Err("Not a recording".into()); }
+        let out = self.exec(&format!("tail -c {LOG_MAX} \"$HOME\"/.nexus/logs/{}", shq(name)), Stdin::None, Duration::from_secs(90)).await?;
+        if out.code.is_some_and(|c| c != 0) { return Err(if out.stderr.is_empty() { "Couldn't read the recording".into() } else { out.stderr }); }
+        Ok(out.stdout.into_bytes())
+    }
+    /// `git worktree add` beside the repository that holds `cwd`; returns the new folder.
+    pub async fn add_worktree(&self, cwd: &str, branch: &str) -> Result<String, String> {
+        let out = self.sh(&worktree_script(cwd, branch), 60).await?;
+        let path = out.stdout.trim().to_string();
+        if out.code == Some(0) && !path.is_empty() { Ok(path) } else { Err(crate::util::clip(out.stderr.trim().lines().last().unwrap_or("git worktree add failed"), 300)) }
     }
 
     pub async fn kill_tmux(&self, name: &str) { let _ = self.sh(&format!("{TMUX} kill-session -t {} 2>/dev/null", shq(name)), 20).await; }
@@ -683,6 +732,17 @@ pub fn key_file_name(p: &Path) -> String { p.file_name().map(|n| n.to_string_los
 mod tests {
     use super::*;
     use crate::platform::{command, run};
+
+    #[test]
+    fn branch_names_and_worktree_script() {
+        for ok in ["main", "feature/login", "nexus/claude-ab12", "v1.2_x"] { assert!(valid_branch(ok), "{ok}"); }
+        for bad in ["", "-x", "/x", "x/", "a..b", "a b", "a;b", "$(id)", "x.lock", ".hidden", "a//b", "a'b"] { assert!(!valid_branch(bad), "{bad}"); }
+        let s = worktree_script("~/code/my app", "feature/login");
+        assert!(s.contains("cd \"$HOME\"/'code/my app'") && s.contains("-worktrees/\"'feature-login'") && s.contains("git worktree add -b 'feature/login' \"$dest\""), "{s}");
+        let a = parse_agent(r#"{"ts": 12.0, "event": "Stop", "summary": "ok"}"#).unwrap();
+        assert_eq!((a.ts, a.event.as_str(), a.summary.as_str(), a.message.as_str()), (12, "Stop", "ok", ""));
+        assert!(parse_agent("[]").is_none() && parse_agent("").is_none());
+    }
 
     #[test]
     fn quoting() {

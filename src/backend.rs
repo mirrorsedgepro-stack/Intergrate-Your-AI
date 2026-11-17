@@ -397,6 +397,32 @@ impl Backend {
         let s = self.sess(id)?;
         self.machine(&s.machine_id).agent_status(s.tmux_name.as_deref()?).await
     }
+    /// Hook reports of every agent session on a machine, by tmux session name.
+    pub async fn agent_statuses(&self, machine_id: &str) -> HashMap<String, remote::AgentStatus> { self.machine(machine_id).agent_statuses().await }
+
+    /// A new git worktree (and branch) for an agent, beside the repository that holds `cwd`.
+    pub async fn add_worktree(&self, machine_id: &str, cwd: String, branch: String) -> Result<String, String> {
+        if !remote::valid_branch(&branch) { return Err("Branch names use letters, digits, . _ - and /".into()); }
+        let m = self.machine_cfg(machine_id).ok_or("Unknown machine")?;
+        if m.is_ssh() { return self.machine(machine_id).add_worktree(&cwd, &branch).await; }
+        self.blocking(move || {
+            if !m.is_wsl() { return local::add_worktree(&cwd, &branch); }
+            let (code, out, err) = platform::wsl_exec(&m.distro, &remote::worktree_script(&cwd, &branch), Duration::from_secs(60));
+            if code == 0 && !out.trim().is_empty() { Ok(out.trim().to_string()) } else { Err(crate::util::clip(err.trim().lines().last().unwrap_or("git worktree add failed"), 300)) }
+        }).await?
+    }
+
+    // ---------------------------------------------------------------- phone alerts (ntfy)
+    /// Tell the configured ntfy topic. Best effort: a phone alert that can't be sent never interrupts anything.
+    pub fn push(&self, title: String, body: String) {
+        let url = self.cfg.lock().unwrap().push.url.clone();
+        if url.is_empty() { return; }
+        self.rt.spawn_blocking(move || { let _ = push_send(&url, &title, &body); });
+    }
+    pub async fn push_test(&self, url: String) -> Result<(), String> {
+        self.blocking(move || push_send(&url, "Nexus", "Phone alerts are working.")).await?
+    }
+
     pub async fn session_cwd(&self, id: u64) -> Option<String> {
         let s = self.sess(id)?;
         self.machine(&s.machine_id).pane_cwd(s.tmux_name.as_deref()?).await
@@ -707,9 +733,18 @@ impl Backend {
             }
         });
     }
-    /// Windows: download the release's installer, check it against the SHA-256 GitHub publishes for the asset, and
-    /// start it. Returns the installer's path; the caller closes Nexus so the installer can replace it.
+    /// Download this platform's installer for a release (Windows setup, macOS disk image, Linux .deb) and check it
+    /// against the SHA-256 GitHub publishes for the asset. Returns its path; the caller decides how to run it.
     pub async fn download_update(&self, version: String) -> Result<PathBuf, String> { self.blocking(move || fetch_installer(&version)).await? }
+    /// Linux: install a downloaded .deb with the system's own password prompt (pkexec).
+    pub async fn install_deb(&self, path: PathBuf) -> Result<(), String> {
+        self.blocking(move || {
+            let mut c = platform::command("pkexec");
+            c.arg("dpkg").arg("-i").arg(&path);
+            let o = platform::run(c, None, Duration::from_secs(300));
+            if o.code == 0 { Ok(()) } else { Err(format!("The package wasn't installed. You can install it yourself: sudo dpkg -i {}", path.display())) }
+        }).await?
+    }
 }
 
 fn self_name() -> String { tailscale::local_status().self_peer.map(|p| p.dns_name).unwrap_or_default() }
@@ -728,10 +763,30 @@ fn latest_release() -> Option<(String, String)> {
     let v = rel["tag_name"].as_str()?.trim_start_matches('v').to_string();
     (!v.is_empty() && newer(&v, VERSION)).then(|| (v, rel["html_url"].as_str().unwrap_or_default().to_string()))
 }
+/// The release asset for a platform: the names scripts/package.sh produces.
+pub fn installer_name(version: &str, os: &str, arch: &str) -> Option<String> {
+    match (os, arch) {
+        ("windows", _) => Some(format!("Nexus-Setup-{version}.exe")),
+        ("macos", "aarch64") => Some(format!("Nexus-{version}-mac-arm64.dmg")),
+        ("macos", "x86_64") => Some(format!("Nexus-{version}-mac-x64.dmg")),
+        ("linux", "x86_64") => Some(format!("Nexus-{version}-linux-amd64.deb")),
+        ("linux", "aarch64") => Some(format!("Nexus-{version}-linux-arm64.deb")),
+        _ => None,
+    }
+}
+/// ntfy: POST the message to the topic address. The title travels in a header, so it is kept to plain ASCII.
+fn push_send(url: &str, title: &str, body: &str) -> Result<(), String> {
+    let url = url.trim();
+    if !(url.starts_with("https://") || url.starts_with("http://")) || url.chars().any(|c| c.is_control() || c.is_whitespace()) { return Err("The address should look like https://ntfy.sh/your-topic".into()); }
+    let title: String = title.chars().map(|c| if c.is_ascii() && !c.is_ascii_control() { c } else { '?' }).take(120).collect();
+    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(15))).build().into();
+    agent.post(url).header("Title", &title).header("Tags", "robot").header("User-Agent", "Nexus").send(crate::util::clip(body, 600)).map(|_| ()).map_err(|e| e.to_string())
+}
+
 fn fetch_installer(version: &str) -> Result<PathBuf, String> {
     use sha2::Digest;
     let rel = release_json(&format!("tags/v{version}")).ok_or("Couldn't read the release from GitHub")?;
-    let name = format!("Nexus-Setup-{version}.exe");
+    let name = installer_name(version, std::env::consts::OS, std::env::consts::ARCH).ok_or("There is no installer for this platform; download it from the release page instead")?;
     let asset = rel["assets"].as_array().and_then(|a| a.iter().find(|x| x["name"] == name.as_str())).ok_or(format!("Release {version} has no {name}"))?;
     let want = asset["digest"].as_str().and_then(|d| d.strip_prefix("sha256:")).ok_or("GitHub did not publish a checksum for the installer; download it from the release page instead")?.to_lowercase();
     let url = asset["browser_download_url"].as_str().filter(|u| u.starts_with(&format!("https://github.com/{REPO}/releases/download/"))).ok_or("Unexpected download address")?;
@@ -739,7 +794,9 @@ fn fetch_installer(version: &str) -> Result<PathBuf, String> {
     let bytes = res.body_mut().with_config().limit(512 * 1024 * 1024).read_to_vec().map_err(|e| e.to_string())?;
     let got: String = sha2::Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
     if got != want { return Err("The downloaded installer does not match the checksum GitHub published for it; it was not run".into()); }
-    let path = std::env::temp_dir().join(name);
+    // Windows runs it straight away; elsewhere the user opens it, so it goes where they'd look for it.
+    let dir = if IS_WIN { std::env::temp_dir() } else { dirs::download_dir().unwrap_or_else(std::env::temp_dir) };
+    let path = dir.join(name);
     std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
     Ok(path)
 }
@@ -781,5 +838,20 @@ mod tests {
         assert!(!newer("1.9.9", "2.0.0"));
         assert!(newer("10.0.0", "9.9.9"));
         assert!(!newer("2.0.0-beta", "2.0.0"));
+    }
+
+    #[test]
+    fn installer_per_platform() {
+        assert_eq!(installer_name("2.1.0", "windows", "x86_64").as_deref(), Some("Nexus-Setup-2.1.0.exe"));
+        assert_eq!(installer_name("2.1.0", "macos", "aarch64").as_deref(), Some("Nexus-2.1.0-mac-arm64.dmg"));
+        assert_eq!(installer_name("2.1.0", "linux", "aarch64").as_deref(), Some("Nexus-2.1.0-linux-arm64.deb"));
+        assert_eq!(installer_name("2.1.0", "freebsd", "x86_64"), None);
+    }
+
+    #[test]
+    fn phone_alert_addresses_are_checked_before_anything_is_sent() {
+        assert!(push_send("ntfy.sh/topic", "t", "b").is_err());
+        assert!(push_send("https://ntfy.sh/a b", "t", "b").is_err());
+        assert!(push_send("file:///etc/passwd", "t", "b").is_err());
     }
 }

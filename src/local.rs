@@ -185,6 +185,24 @@ const SETUP_KEY_SH: &str = include_str!("../scripts/setup-ssh-key.sh");
 const SETUP_KEY_PS1: &str = include_str!("../scripts/setup-ssh-key.ps1");
 
 /// The "Set up SSH key" helper for this OS, as a file the local shell can run.
+/// `git worktree add` on this computer (see remote::worktree_script for the layout).
+pub fn add_worktree(cwd: &str, branch: &str) -> Result<String, String> {
+    let git = |dir: &std::path::Path, args: &[&std::ffi::OsStr]| -> Result<String, String> {
+        let mut c = crate::platform::command("git");
+        c.current_dir(dir).args(args);
+        let o = crate::platform::run(c, None, Duration::from_secs(60));
+        if o.code == 0 { Ok(String::from_utf8_lossy(&o.stdout).trim().to_string()) } else { Err(crate::util::clip(o.stderr.trim().lines().last().unwrap_or("git failed (is it installed?)"), 300)) }
+    };
+    let os = std::ffi::OsStr::new;
+    let dir = match cwd.strip_prefix('~') { Some(rest) => dirs::home_dir().ok_or("No home folder")?.join(rest.trim_start_matches(['/', '\\'])), None => PathBuf::from(cwd) };
+    let top = PathBuf::from(git(&dir, &[os("rev-parse"), os("--show-toplevel")])?);
+    let name = top.file_name().ok_or("Not a repository folder")?.to_string_lossy().into_owned();
+    let dest = top.parent().ok_or("Not a repository folder")?.join(format!("{name}-worktrees")).join(crate::remote::worktree_slug(branch));
+    if let Some(p) = dest.parent() { std::fs::create_dir_all(p).map_err(|e| e.to_string())?; }
+    git(&top, &[os("worktree"), os("add"), os("-b"), os(branch), dest.as_os_str()]).or_else(|_| git(&top, &[os("worktree"), os("add"), dest.as_os_str(), os(branch)]))?;
+    Ok(dest.to_string_lossy().into_owned())
+}
+
 pub fn setup_key_script() -> Result<PathBuf, String> {
     let (name, text) = if IS_WIN { ("setup-ssh-key.ps1", SETUP_KEY_PS1) } else { ("setup-ssh-key.sh", SETUP_KEY_SH) };
     let dir = crate::config::dir().join("scripts");
