@@ -620,6 +620,13 @@ impl Machine {
         Ok(ch)
     }
 
+    /// A long-running command with no pty whose output is read as it arrives (the team chat's `tail -F`).
+    pub async fn exec_stream(&self, cmd: &str) -> Result<russh::Channel<client::Msg>, String> {
+        let ch = self.handle()?.channel_open_session().await.map_err(|e| e.to_string())?;
+        ch.exec(true, cmd).await.map_err(|e| e.to_string())?;
+        Ok(ch)
+    }
+
     /// What the agent in this tmux session last reported through its hooks (see HOOK_SH), or None.
     pub async fn agent_status(&self, tmux_name: &str) -> Option<AgentStatus> {
         let out = self.sh(&format!("cat \"$HOME\"/.nexus/agent/{}.json 2>/dev/null", shq(&safe_name(tmux_name, "._-"))), 5).await.ok()?;
