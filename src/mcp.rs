@@ -76,7 +76,7 @@ pub type CallFuture = Pin<Box<dyn Future<Output = Result<Value, String>> + Send>
 /// What the app does for each tool call. ReadOutput returns the raw recent output as a JSON string.
 pub type Handler = Arc<dyn Fn(Call) -> CallFuture + Send + Sync>;
 
-pub struct McpServer { pub port: u16, task: tokio::task::JoinHandle<()> }
+pub struct McpServer { #[cfg_attr(not(test), allow(dead_code))] pub port: u16, task: tokio::task::JoinHandle<()> }
 
 struct RpcError(i64, String);
 

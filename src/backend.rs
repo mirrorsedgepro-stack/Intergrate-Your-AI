@@ -60,16 +60,18 @@ pub struct SessionSpec {
 
 enum RCmd { Write(Vec<u8>), Resize(u16, u16), Close }
 enum Io {
-    Local { writer: Mutex<Box<dyn std::io::Write + Send>>, master: Mutex<Box<dyn portable_pty::MasterPty + Send>>, killer: Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>> },
+    /// `input` feeds a writer thread, so a program that has stopped reading can never stall the UI.
+    Local { input: Mutex<std::sync::mpsc::Sender<Vec<u8>>>, master: Mutex<Box<dyn portable_pty::MasterPty + Send>>, killer: Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>> },
     Remote(mpsc::UnboundedSender<RCmd>),
 }
-struct Sess { machine_id: String, preset_id: String, cwd: Option<String>, tmux_name: Option<String>, io: Io, recent: Mutex<Vec<u8>> }
+type Recent = Arc<Mutex<Vec<u8>>>;
+struct Sess { machine_id: String, preset_id: String, cwd: Option<String>, tmux_name: Option<String>, io: Io, recent: Recent }
+fn keep(recent: &Recent, data: &[u8]) {
+    let mut r = recent.lock().unwrap();
+    r.extend_from_slice(data);
+    if r.len() > OUT_KEEP * 2 { let cut = r.len() - OUT_KEEP; r.drain(..cut); }
+}
 impl Sess {
-    fn keep(&self, data: &[u8]) {
-        let mut r = self.recent.lock().unwrap();
-        r.extend_from_slice(data);
-        if r.len() > OUT_KEEP * 2 { let cut = r.len() - OUT_KEEP; r.drain(..cut); }
-    }
     fn recent(&self) -> String { let r = self.recent.lock().unwrap(); String::from_utf8_lossy(&r[r.len().saturating_sub(OUT_KEEP)..]).into_owned() }
 }
 
@@ -230,7 +232,7 @@ impl Backend {
                 if restart { let (b2, id) = (b.clone(), id2.clone()); b.rt.spawn(async move { let _ = b2.start_hub(&id).await; }); }
             }),
         };
-        let m = Machine::new(id, store);
+        let m = Machine::new(store);
         self.machines.lock().unwrap().insert(id.to_string(), m.clone());
         m
     }
@@ -283,12 +285,17 @@ impl Backend {
             // WSL paths are resolved inside the distro.
             let sp = SpawnSpec { cmd, cols, rows, cwd: spec.cwd.clone(), script, wsl: m.is_wsl().then(|| m.distro.clone()) };
             let pty = self.blocking(move || local::spawn(&sp)).await??;
-            let local::Pty { master, mut reader, writer, mut child } = pty;
+            let local::Pty { master, mut reader, mut writer, mut child } = pty;
+            let (input, input_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+            std::thread::spawn(move || { for data in input_rx { if std::io::Write::write_all(&mut writer, &data).and_then(|()| std::io::Write::flush(&mut writer)).is_err() { break; } } });
+            let recent = Recent::default();
             let sess = Arc::new(Sess {
-                machine_id: m.id.clone(), preset_id: preset.id.clone(), cwd: spec.cwd.clone(), tmux_name: None, recent: Mutex::default(),
-                io: Io::Local { writer: Mutex::new(writer), master: Mutex::new(master), killer: Mutex::new(child.clone_killer()) },
+                machine_id: m.id.clone(), preset_id: preset.id.clone(), cwd: spec.cwd.clone(), tmux_name: None, recent: recent.clone(),
+                io: Io::Local { input: Mutex::new(input), master: Mutex::new(master), killer: Mutex::new(child.clone_killer()) },
             });
-            self.sessions.lock().unwrap().insert(id, sess.clone());
+            self.sessions.lock().unwrap().insert(id, sess);
+            // The reader holds no reference to the session: on Windows the ConPTY only reports end-of-file once the
+            // session (and with it the pty) has been dropped.
             let (me, tx) = (self.arc(), self.tx.clone());
             let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
             std::thread::spawn(move || {
@@ -296,7 +303,7 @@ impl Backend {
                 loop {
                     match std::io::Read::read(&mut reader, &mut buf) {
                         Ok(n) if n > 0 => {
-                            sess.keep(&buf[..n]);
+                            keep(&recent, &buf[..n]);
                             // Blocks when the UI is behind: the PTY (and the program writing to it) then waits too.
                             if tx.blocking_send(Event::Data(id, buf[..n].to_vec())).is_err() { break; }
                             (me.wake)();
@@ -309,8 +316,7 @@ impl Backend {
             let me = self.arc();
             std::thread::spawn(move || {
                 let code = child.wait().ok().map(|s| s.exit_code() as i32);
-                // Let the reader drain what the program printed last. (On Windows the ConPTY only reports end-of-file
-                // once the session below is dropped, so don't wait for it there.)
+                // Let the reader drain what the program printed last (on Windows it can't finish until the session is dropped).
                 let _ = done_rx.recv_timeout(Duration::from_millis(if IS_WIN { 80 } else { 400 }));
                 if me.sessions.lock().unwrap().remove(&id).is_some() { me.emit(Event::Exit { pid: id, code, disconnected: false }); }
             });
@@ -326,8 +332,9 @@ impl Backend {
         };
         let ch = mach.open(tmux_name.as_deref(), &cmd, cols, rows, spec.cwd.as_deref().unwrap_or(""), spec.read_only, cfg.appearance.record_sessions).await?;
         let (ctl, mut rx) = mpsc::unbounded_channel();
-        let sess = Arc::new(Sess { machine_id: m.id.clone(), preset_id: preset.id.clone(), cwd: spec.cwd.clone(), tmux_name: tmux_name.clone(), io: Io::Remote(ctl), recent: Mutex::default() });
-        self.sessions.lock().unwrap().insert(id, sess.clone());
+        let recent = Recent::default();
+        let sess = Arc::new(Sess { machine_id: m.id.clone(), preset_id: preset.id.clone(), cwd: spec.cwd.clone(), tmux_name: tmux_name.clone(), io: Io::Remote(ctl), recent: recent.clone() });
+        self.sessions.lock().unwrap().insert(id, sess);
         let me = self.arc();
         self.rt.spawn(async move {
             let (mut rd, wr) = ch.split();
@@ -336,7 +343,7 @@ impl Backend {
                 tokio::select! {
                     msg = rd.wait() => match msg {
                         Some(ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. }) => {
-                            sess.keep(&data);
+                            keep(&recent, &data);
                             if me.tx.send(Event::Data(id, data.to_vec())).await.is_err() { break; }
                             (me.wake)();
                         }
@@ -360,7 +367,7 @@ impl Backend {
     pub fn write(&self, id: u64, data: &[u8]) {
         let Some(s) = self.sess(id) else { return };
         match &s.io {
-            Io::Local { writer, .. } => { let mut w = writer.lock().unwrap(); let _ = std::io::Write::write_all(&mut *w, data); let _ = std::io::Write::flush(&mut *w); }
+            Io::Local { input, .. } => { let _ = input.lock().unwrap().send(data.to_vec()); }
             Io::Remote(tx) => { let _ = tx.send(RCmd::Write(data.to_vec())); }
         }
     }
@@ -371,13 +378,16 @@ impl Backend {
             Io::Remote(tx) => { let _ = tx.send(RCmd::Resize(cols, rows)); }
         }
     }
-    fn end(s: &Sess) {
-        match &s.io { Io::Local { killer, .. } => { let _ = killer.lock().unwrap().kill(); } Io::Remote(tx) => { let _ = tx.send(RCmd::Close); } }
+    fn end(s: Arc<Sess>) {
+        let killer = match &s.io { Io::Local { killer, .. } => Some(killer.lock().unwrap().clone_killer()), Io::Remote(tx) => { let _ = tx.send(RCmd::Close); None } };
+        // Killing waits for the program to go; do that off the UI thread, and only let go of the pty afterwards
+        // (dropping its writer types newline + end-of-file, which must not reach a program that is still alive).
+        if let Some(mut k) = killer { std::thread::spawn(move || { let _ = k.kill(); drop(s); }); }
     }
     pub fn close(&self, id: u64, kill: bool) {
         let Some(s) = self.sessions.lock().unwrap().remove(&id) else { return };
-        Self::end(&s);
         if let (true, Some(name)) = (kill, s.tmux_name.clone()) { self.kill_tmux(&s.machine_id, &name); }
+        Self::end(s);
     }
     pub fn kill_tmux(&self, machine_id: &str, name: &str) {
         let (m, name) = (self.machine(machine_id), name.to_string());
@@ -427,7 +437,8 @@ impl Backend {
 
     /// Stop everything (window closing).
     pub fn shutdown(&self) {
-        for (_, s) in self.sessions.lock().unwrap().drain() { Self::end(&s); }
+        let all: Vec<Arc<Sess>> = self.sessions.lock().unwrap().drain().map(|x| x.1).collect();
+        for s in all { Self::end(s); }
         for (_, t) in self.tunnels.lock().unwrap().drain() { t.task.abort(); }
         self.mcp.lock().unwrap().take();
         self.stop_hub();
@@ -546,7 +557,7 @@ impl Backend {
         let me = self.arc();
         self.rt.spawn(async move { if let Ok(srv) = McpServer::start(VERSION.into(), handler).await { *me.mcp.lock().unwrap() = Some(srv); } });
     }
-    async fn mcp_call(&self, call: mcp::Call) -> Result<Value, String> {
+    pub(crate) async fn mcp_call(&self, call: mcp::Call) -> Result<Value, String> {
         let no = |id: &str| format!("No session {id}");
         let find = |id: &str| -> Result<(u64, Arc<Sess>), String> { let n: u64 = id.trim_start_matches('s').parse().map_err(|_| no(id))?; Ok((n, self.sess(n).ok_or_else(|| no(id))?)) };
         match call {

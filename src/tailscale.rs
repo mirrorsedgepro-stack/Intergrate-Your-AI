@@ -32,7 +32,6 @@ pub struct TsUser { pub login: String, pub name: String }
 #[derive(Clone, Debug, Default)]
 pub struct LocalStatus {
     pub installed: bool,
-    pub running: bool,
     /// Running | NeedsLogin | Stopped …
     pub state: String,
     pub tailnet: Option<String>,
@@ -51,7 +50,6 @@ pub fn parse_local_status(data: &Value) -> LocalStatus {
     let user = me["UserID"].as_i64().map(|id| &data["User"][id.to_string()]).filter(|u| u.is_object()).map(|u| TsUser { login: s(&u["LoginName"]), name: s(&u["DisplayName"]) });
     LocalStatus {
         installed: true,
-        running: true,
         state: s(&data["BackendState"]),
         tailnet: data["CurrentTailnet"]["Name"].as_str().map(String::from),
         self_peer: me.is_object().then(|| peer(me)),
@@ -387,11 +385,11 @@ pub fn decode_invite(code: &str, local_tailnet: Option<&str>) -> Result<Invite, 
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct SparkArg { pub machine_id: String, pub hostname: String, pub ts_host: String }
+pub struct SparkArg { pub hostname: String, pub ts_host: String }
 #[derive(Clone, Debug, Default)]
 pub struct Device { pub id: String, pub name: String, pub tags: Vec<String> }
 #[derive(Clone, Debug, Default)]
-pub struct SparkMatch { pub machine_id: String, pub hostname: String, pub ambiguous: bool, pub device: Option<Device> }
+pub struct SparkMatch { pub hostname: String, pub ambiguous: bool, pub device: Option<Device> }
 
 /// Match configured SSH machines to tailnet devices. Prefer the machine's recorded Tailscale name (exact); fall back to
 /// the hostname the machine reports only when exactly one device has it; never pick this PC itself. Tagging a device
@@ -408,7 +406,7 @@ pub fn match_devices(devices: &[Value], machines: &[SparkArg], self_dns_name: &s
             if hits.len() == 1 { d = Some(hits[0]); } else { ambiguous = hits.len() > 1; }
         }
         SparkMatch {
-            machine_id: m.machine_id.clone(), hostname: m.hostname.clone(), ambiguous,
+            hostname: m.hostname.clone(), ambiguous,
             device: d.map(|d| Device { id: d["id"].as_str().or(d["nodeId"].as_str()).unwrap_or_default().to_string(), name: s(&d["name"]), tags: strs(&d["tags"]) }),
         }
     }).collect()
@@ -530,7 +528,7 @@ mod tests {
             json!({ "id": "a", "name": "dup-a.tail1.ts.net", "hostname": "dup", "tags": [] }),
             json!({ "id": "b", "name": "dup-b.tail1.ts.net", "hostname": "dup", "tags": [] }),
         ];
-        let a = |id: &str, h: &str, t: &str| SparkArg { machine_id: id.into(), hostname: h.into(), ts_host: t.into() };
+        let a = |_id: &str, h: &str, t: &str| SparkArg { hostname: h.into(), ts_host: t.into() };
         let r = match_devices(&devices, &[a("m1", "whatever", "spark1.tail1.ts.net"), a("m2", "spark1", ""), a("m3", "dup", ""), a("m4", "my-pc", "my-pc.tail1.ts.net")], "my-pc.tail1.ts.net.");
         assert_eq!(r[0].device.as_ref().unwrap().id, "s1");
         assert_eq!(r[1].device.as_ref().unwrap().id, "s1", "this PC (same hostname) is excluded, leaving one match");

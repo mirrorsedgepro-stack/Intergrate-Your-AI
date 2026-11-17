@@ -3,7 +3,7 @@
 //!   chat.jsonl          one JSON message per line, appended atomically (lines are kept well under PIPE_BUF)
 //!   presence/<id>.json  each Nexus's heartbeat: who, status line, which sessions it has open
 //! This file holds the data model and the remote commands; the hub connection itself lives in `backend`.
-use crate::util::{clip, now_ms};
+use crate::util::now_ms;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -138,9 +138,6 @@ impl LineBuf {
         out
     }
 }
-
-/// "…" when a display string was cut.
-pub fn ellipsize(s: &str, n: usize) -> String { if s.chars().count() > n { format!("{}…", clip(s, n)) } else { s.to_string() } }
 
 #[cfg(test)]
 mod tests {

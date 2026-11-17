@@ -245,10 +245,9 @@ struct State {
     encrypted_keys: Vec<PathBuf>,
     tried_keys: String,
 }
-struct Conn { handle: Arc<Handle>, jumps: Vec<Arc<Handle>>, route: &'static str }
+struct Conn { handle: Arc<Handle>, jumps: Vec<Arc<Handle>> }
 
 pub struct Machine {
-    pub id: String,
     store: Store,
     state: Mutex<State>,
     conn: Mutex<Option<Arc<Conn>>>,
@@ -265,7 +264,7 @@ pub struct Probe { pub tools: HashMap<String, bool>, pub sessions: Vec<TmuxSessi
 #[derive(Default, Debug, Clone)]
 pub struct Dirs { pub repos: Vec<String>, pub dirs: Vec<String> }
 #[derive(Default, Debug, Clone)]
-pub struct AgentStatus { pub ts: i64, pub event: String, pub cwd: String, pub message: String, pub summary: String }
+pub struct AgentStatus { pub ts: i64, pub event: String, pub message: String, pub summary: String }
 pub struct ExecOut { pub code: Option<u32>, pub stdout: String, pub stderr: String }
 pub enum Stdin { None, Bytes(Vec<u8>), File(PathBuf) }
 
@@ -312,8 +311,8 @@ fn safe_name(s: &str, keep: &str) -> String { s.chars().map(|c| if c.is_ascii_al
 struct Hop { host: String, port: u16, user: String, address: String, sc: HostConfig }
 
 impl Machine {
-    pub fn new(id: &str, store: Store) -> Arc<Self> {
-        Arc::new(Self { id: id.into(), store, state: Mutex::default(), conn: Mutex::new(None), connecting: tokio::sync::Mutex::new(()), net_rate: Mutex::default(), epoch: 0.into() })
+    pub fn new(store: Store) -> Arc<Self> {
+        Arc::new(Self { store, state: Mutex::default(), conn: Mutex::new(None), connecting: tokio::sync::Mutex::new(()), net_rate: Mutex::default(), epoch: 0.into() })
     }
     pub fn status(&self) -> Status { self.state.lock().unwrap().status.unwrap_or(Status::Offline) }
     pub fn is_online(&self) -> bool { self.status() == Status::Online && self.conn.lock().unwrap().is_some() }
@@ -458,7 +457,7 @@ impl Machine {
         };
         let handle = chain.pop().expect("at least the target hop");
         let route = if is_tailnet_address(address) { "tailscale" } else if via_jump { "jump" } else { "lan" };
-        *self.conn.lock().unwrap() = Some(Arc::new(Conn { handle, jumps: chain, route }));
+        *self.conn.lock().unwrap() = Some(Arc::new(Conn { handle, jumps: chain }));
         { let mut st = self.state.lock().unwrap(); st.home_dir = None; st.route = Some(route); }
         // ~/.nexus holds pasted screenshots, uploads and team chat: private to this account.
         let setup = format!("umask 077; mkdir -p ~/.nexus/uploads && chmod 700 ~/.nexus ~/.nexus/uploads; cat > ~/.nexus/tmux.conf && ({TMUX} source-file ~/.nexus/tmux.conf >/dev/null 2>&1 || true); find ~/.nexus/uploads -type f -mtime +7 -delete 2>/dev/null; find ~/.nexus/logs -type f -mtime +30 -delete 2>/dev/null; true");
@@ -632,7 +631,7 @@ impl Machine {
         let out = self.sh(&format!("cat \"$HOME\"/.nexus/agent/{}.json 2>/dev/null", shq(&safe_name(tmux_name, "._-"))), 5).await.ok()?;
         let r: serde_json::Value = serde_json::from_str(&out.stdout).ok().filter(serde_json::Value::is_object)?;
         let s = |k: &str, n: usize| crate::util::clip(r[k].as_str().unwrap_or_default(), n);
-        Some(AgentStatus { ts: r["ts"].as_f64().unwrap_or(0.0) as i64, event: s("event", 24), cwd: s("cwd", 300), message: s("message", 300), summary: s("summary", 400) })
+        Some(AgentStatus { ts: r["ts"].as_f64().unwrap_or(0.0) as i64, event: s("event", 24), message: s("message", 300), summary: s("summary", 400) })
     }
 
     pub async fn kill_tmux(&self, name: &str) { let _ = self.sh(&format!("{TMUX} kill-session -t {} 2>/dev/null", shq(name)), 20).await; }
@@ -678,7 +677,6 @@ async fn agent_auth(h: &mut Handle, user: &str, tried: &mut Vec<String>) -> bool
     false
 }
 
-#[allow(dead_code)]
 pub fn key_file_name(p: &Path) -> String { p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default() }
 
 #[cfg(test)]
