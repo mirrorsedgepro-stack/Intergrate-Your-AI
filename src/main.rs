@@ -1,6 +1,8 @@
 //! Nexus: one terminal for Claude Code, the Antigravity CLI, OpenClaw and shells, on this computer and on any
 //! machine you can SSH into.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+// The code favours dense one-liners and callback types spelled out where they are used.
+#![allow(clippy::type_complexity, clippy::too_many_arguments, clippy::suspicious_else_formatting, clippy::possible_missing_else, clippy::unnecessary_sort_by, clippy::sliced_string_as_bytes)]
 
 mod backend;
 mod collab;

@@ -46,6 +46,12 @@ fn section(ui: &mut egui::Ui, title: &str) { ui.add_space(10.0); ui.label(RichTe
 fn field(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) { ui.vertical(|ui| { ui.label(RichText::new(label).size(11.0).color(TEXT2)); add(ui); }); }
 
 impl App {
+    /// Is the keyboard in one of the text boxes beside the panes (composer, team chat, find)? Otherwise it is the
+    /// focused terminal's, whatever button was clicked last.
+    pub fn text_has_focus(&self) -> bool {
+        let Some(f) = self.ctx.memory(|m| m.focused()) else { return false };
+        f == egui::Id::unique("composer-text") || f == egui::Id::unique("team-input") || self.panes.iter().flatten().any(|id| f == egui::Id::unique(("search", *id)))
+    }
     pub fn overlay_open(&self) -> bool { !self.dialogs.is_empty() || self.palette.is_some() || self.settings.is_some() || self.share.is_some() }
 
     // ---------------------------------------------------------------- dialogs
@@ -652,8 +658,7 @@ impl App {
         self.ctx.options_mut(|o| o.zoom_with_keyboard = false);
         // Open dialogs (palette, settings, share, prompts) own the keyboard: keys never reach the terminal behind them.
         if self.overlay_open() || self.menu.is_some() { return; }
-        let focused_widget = self.ctx.memory(|m| m.focused());
-        let text_focus = focused_widget.is_some() && focused_widget != self.term_focus_id();
+        let text_focus = self.text_has_focus();
         let events = self.ctx.input(|i| i.events.clone());
         let target = self.focused();
         for ev in events {
@@ -670,8 +675,8 @@ impl App {
                 }
                 egui::Event::Text(t) if !text_focus => {
                     let m = self.ctx.input(|i| i.modifiers);
-                    // Alt+key was already sent as ESC+key; Ctrl/Cmd combos are never text.
-                    if (m.alt && !m.ctrl && !IS_MAC) || m.command { continue; }
+                    // Alt+key was already sent as ESC+key; Ctrl/Cmd combos are never text (Ctrl+Alt is AltGr: that is text).
+                    if (m.alt && !m.ctrl && !IS_MAC) || (m.command && !m.alt) { continue; }
                     if let Some(id) = target { self.input(id, t.as_bytes()); }
                 }
                 // Ctrl+C copies when text is selected, otherwise it interrupts (on macOS Ctrl+C is always the terminal's).

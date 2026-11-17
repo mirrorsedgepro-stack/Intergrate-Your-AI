@@ -2,8 +2,8 @@ name: Verify and publish
 
 # Scans a draft release's installers and publishes it only if they're clean.
 #   Blocking:  VirusTotal (~70 engines) on every installer, Microsoft Defender on the Windows installer.
-#   Reported:  ClamAV via hugoalh/scan-virus-ghaction (its bundled 2023 ClamAV flags the official Electron binary
-#              itself as Win.Trojan.Virut, so it can't block Electron apps; its result is shown in the notes).
+#   Reported:  ClamAV via hugoalh/scan-virus-ghaction (its bundled ClamAV has 2023 signatures and has produced false
+#              positives before, so it doesn't block; its result is shown in the notes).
 # Runs after every release build (called from release.yml) or manually for an existing draft.
 on:
   workflow_call:
@@ -179,7 +179,7 @@ jobs:
           if [ "$CLAM_OUTCOME" = success ] && [ "$CLAM_FOUND" != True ] && [ "$CLAM_FOUND" != true ]; then
             clam="- ClamAV ([hugoalh/scan-virus-ghaction](https://github.com/hugoalh/scan-virus-ghaction)): no threats"
           else
-            clam="- ClamAV ([hugoalh/scan-virus-ghaction](https://github.com/hugoalh/scan-virus-ghaction), bundled ClamAV 1.0.3 with 2023 signatures): reports \`Win.Trojan.Virut\` on the Windows Nexus.exe. The same scanner flags the official, unmodified Electron runtime that Nexus is built on, so this is a false positive; the engines above find nothing."
+            clam="- ClamAV ([hugoalh/scan-virus-ghaction](https://github.com/hugoalh/scan-virus-ghaction), bundled ClamAV 1.0.3 with 2023 signatures): reported a finding or did not complete; see the scan log. The engines above found nothing."
           fi
           {
             echo

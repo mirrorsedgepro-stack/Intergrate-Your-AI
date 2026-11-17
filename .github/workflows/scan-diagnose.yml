@@ -51,16 +51,7 @@ jobs:
           echo "== files flagged inside the installers =="
           clamscan -r --infected --no-summary --max-filesize=500M --max-scansize=2000M x || true
           echo "== executables inside the new installer =="
-          find x/new -iname '*.exe' -o -iname '*.dll' -o -iname '*.node' | sort | head -80
-      - name: Scan the official, unmodified Electron build for comparison
-        run: |
-          v=$(node -p "require('./package.json').devDependencies.electron.replace(/^[^0-9]*/, '')" 2>/dev/null || true)
-          [ -n "$v" ] || v=44.5.1
-          echo "Electron $v"
-          curl -sfL -o electron.zip "https://github.com/electron/electron/releases/download/v$v/electron-v$v-win32-x64.zip"
-          mkdir -p electron-official && 7z x -y -bd electron.zip -oelectron-official >/dev/null
-          sha256sum electron-official/electron.exe
-          clamscan --infected --no-summary electron-official/electron.exe && echo "official electron.exe: clean" || echo "official electron.exe: FLAGGED (above)"
+          find x/new -iname '*.exe' -o -iname '*.dll' | sort | head -80
 
   # Second engine on the exact flagged binary: Microsoft Defender on a Windows runner.
   defender:
@@ -70,8 +61,8 @@ jobs:
         shell: bash
         run: |
           mkdir -p dl && gh release download "$IN_TAG" --repo "$GITHUB_REPOSITORY" --dir dl --pattern '*.exe'
-          7z x -y -bd dl/*.exe -ox >/dev/null && 7z x -y -bd 'x/$PLUGINSDIR/app-64.7z' -ox/app >/dev/null
-          sha256sum dl/*.exe x/app/Nexus.exe
+          7z x -y -bd dl/*.exe -ox >/dev/null
+          sha256sum dl/*.exe x/*.exe
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IN_TAG: ${{ inputs.tag }}
@@ -83,24 +74,7 @@ jobs:
           if (-not (Test-Path $mp)) { Write-Host "Defender is not available on this runner"; exit 0 }
           & $mp -SignatureUpdate | Select-Object -Last 1
           (Get-MpComputerStatus).AntivirusSignatureVersion
-          foreach ($f in @(Get-ChildItem dl/*.exe) + @(Get-Item x/app/Nexus.exe)) {
+          foreach ($f in @(Get-ChildItem dl/*.exe) + @(Get-ChildItem x/*.exe)) {
             Write-Host "== $($f.Name)"
             & $mp -Scan -ScanType 3 -File $f.FullName -DisableRemediation | Select-Object -Last 2
           }
-
-  # Does the release gate's own scanner flag the official, untouched Electron binary?
-  gate-on-official-electron:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Fetch official Electron
-        run: |
-          v=44.5.1
-          curl -sfL -o electron.zip "https://github.com/electron/electron/releases/download/v$v/electron-v$v-win32-x64.zip"
-          sudo apt-get install -y -qq p7zip-full >/dev/null
-          mkdir -p official && 7z x -y -bd electron.zip -oofficial electron.exe >/dev/null && rm electron.zip
-          sha256sum official/electron.exe
-      - name: Release-gate scanner on official electron.exe
-        uses: hugoalh/scan-virus-ghaction@99c81e8991ad1074a14e5f22a21bce9be035e14e # v0.20.1
-        with:
-          clamav_enable: 'True'
-          clamav_update: 'True'

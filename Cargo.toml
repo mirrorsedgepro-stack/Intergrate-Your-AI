@@ -7,7 +7,6 @@ description = "One terminal to orchestrate Claude, Antigravity, OpenClaw and she
 authors = ["mirrorsedgepro-stack"]
 repository = "https://github.com/mirrorsedgepro-stack/Intergrate-Your-AI"
 homepage = "https://github.com/mirrorsedgepro-stack/Intergrate-Your-AI"
-license = "MIT"
 publish = false
 default-run = "nexus"
 
@@ -59,3 +58,20 @@ panic = "abort"
 
 [profile.dev]
 opt-level = 1
+
+# Linux package: `cargo deb` (cargo install cargo-deb). Same package name as the Electron builds, so apt upgrades in place.
+[package.metadata.deb]
+name = "nexus-terminal"
+maintainer = "mirrorsedgepro-stack <mirrorsedgepro-stack@users.noreply.github.com>"
+section = "utils"
+priority = "optional"
+depends = "$auto, openssh-client, libxkbcommon0, libgl1"
+recommends = "libx11-6, libxcursor1, libxi6, libxkbcommon-x11-0, libwayland-client0, libwayland-egl1"
+extended-description = "Nexus runs Claude Code, the Antigravity CLI, OpenClaw and shells on this computer and on any Linux machine you can SSH into, side by side, in tmux sessions that survive disconnects."
+assets = [
+    ["target/release/nexus", "usr/bin/nexus", "755"],
+    ["target/release/nexus-mcp", "usr/bin/nexus-mcp", "755"],
+    ["packaging/linux/nexus.desktop", "usr/share/applications/nexus.desktop", "644"],
+    ["assets/icon.png", "usr/share/icons/hicolor/256x256/apps/nexus.png", "644"],
+    ["assets/icon-1024.png", "usr/share/icons/hicolor/1024x1024/apps/nexus.png", "644"],
+]

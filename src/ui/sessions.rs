@@ -148,7 +148,7 @@ impl App {
             if m.is_ssh() && m.host.is_empty() && m.ts_host.is_empty() { self.open_settings(); self.toast(format!("Add the address of {} first.", m.name), TEXT2, 3800); if let Some(d) = done { d(self, None); } return; }
             if self.is_missing(&m, &self.preset(preset_id)) && !extra.raw && extra.script.is_none() { let hint = self.install_hint(&m, preset_id); self.toast_warn(hint); }
         }
-        if stage <= 0 && plain && self.check_folder_conflict(machine_id, preset_id, extra.clone(), done.is_none()) { if let Some(d) = done { d(self, None); } return; }
+        if stage == 0 && plain && self.check_folder_conflict(machine_id, preset_id, extra.clone(), done.is_none()) { if let Some(d) = done { d(self, None); } return; }
         if stage <= 1 && plain && !extra.queued && self.check_claim(machine_id, preset_id, extra.clone(), done.is_none()) { if let Some(d) = done { d(self, None); } return; }
         let id = self.make_session(machine_id, preset_id, extra, plain);
         self.show(id);

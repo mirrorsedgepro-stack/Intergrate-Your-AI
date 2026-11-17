@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Nexus
+GenericName=Terminal
+Comment=One terminal for Claude, Antigravity, OpenClaw and shells across your machines
+Exec=nexus
+Icon=nexus
+Terminal=false
+Categories=Development;System;TerminalEmulator;
+StartupWMClass=com.nexus.terminal

@@ -30,8 +30,6 @@ pub fn url_at(line: &str, col: usize) -> Option<String> {
 }
 
 impl App {
-    pub(super) fn term_focus_id(&self) -> Option<egui::Id> { Some(egui::Id::unique(("term", self.focus))) }
-
     /// Files dropped on the window go to the pane under the pointer (or the focused one).
     pub(super) fn handle_drops(&mut self) {
         let paths: Vec<std::path::PathBuf> = self.ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| p.is_absolute()).collect());
@@ -161,7 +159,7 @@ impl App {
         let now = now_ms();
         let widget = egui::Id::unique(("term", i));
         let resp = ui.interact(body, widget, egui::Sense::click_and_drag());
-        let owns_kb = is_focus && !self.overlay_open() && self.win_focused && ui.memory(|m| m.focused().is_none_or(|f| f == widget));
+        let owns_kb = is_focus && !self.overlay_open() && self.menu.is_none() && self.win_focused && !self.text_has_focus();
         if owns_kb {
             // Tab, arrows and Escape belong to the program in the terminal, not to moving focus between widgets.
             resp.request_focus();
@@ -258,7 +256,7 @@ impl App {
                     let te = egui::Id::unique(("search", id));
                     if ui.memory(|m| m.has_focus(te)) {
                         ui.input_mut(|i| {
-                            if i.consume_key(egui::Modifiers::SHIFT, egui::Key::Enter) { find = Some(false); } else if i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) { find = Some(false); }
+                            if i.consume_key(egui::Modifiers::SHIFT, egui::Key::Enter) || i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) { find = Some(false); }
                             if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) { close = true; }
                         });
                         if find.is_some() && ui.input(|i| i.modifiers.shift) { find = Some(true); }

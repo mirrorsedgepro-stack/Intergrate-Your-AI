@@ -10,16 +10,18 @@ Download from [Releases](https://github.com/mirrorsedgepro-stack/Intergrate-Your
 
 | OS | File | Notes |
 |---|---|---|
-| Windows 10/11 | `Nexus-Setup-x.y.z.exe` | Updates itself. Unsigned: SmartScreen asks once (More info → Run anyway). |
+| Windows 10/11 | `Nexus-Setup-x.y.z.exe` | Tells you when a new version is out and installs it when you ask. Unsigned: SmartScreen asks once (More info → Run anyway). |
 | macOS (Apple Silicon / Intel) | `Nexus-x.y.z-mac-arm64.dmg` / `…-mac-x64.dmg` | Unsigned: the first time, right-click Nexus in Applications → Open. Nexus tells you when a new version is out. |
 | Linux x86_64 / arm64 (Debian, Ubuntu, DGX OS…) | `Nexus-x.y.z-linux-amd64.deb` / `…-linux-arm64.deb` | `sudo apt install ./Nexus-*.deb`. Other distros: run from source. |
 
-**From source** (any OS, Node 22+):
+**From source** (any OS, [Rust](https://rustup.rs) 1.85+):
 
 ```
-npm install && node node_modules/electron/install.js
-npm start                                # Windows also: Start-Nexus.cmd
+cargo run --release
 ```
+
+Nexus is a single native program written in Rust: no Electron, no Node, no browser engine. Coming from 1.x? See
+[Upgrading from 1.x](#upgrading-from-1x).
 
 ### Per-OS behaviour
 
@@ -59,7 +61,7 @@ The machine needs `sshd` running (`sudo apt install openssh-server`).
 | **Claims & queue** | Team chat `/claim gpu-box 2h fine-tuning` marks a machine as yours on everyone's cards (`/release gpu-box` when done). Launching an agent on a claimed machine offers **Start when free**: it starts once the claim is gone and the GPU is idle. |
 | **Export / import** | Ctrl+Shift+O → export workspaces and presets to a JSON file, or import a teammate's (sessions are re-pointed at your machines by address or name). **Publish my presets to the team** puts them on the chat hub for others to import. |
 | **Offline mode** | Settings: no update checks, no internet installers. *Install tools* then uses installers you place in `~/.nexus/offline/` on each machine (`claude-install.sh`, `agy-install.sh`, `openclaw-install.sh`). |
-| **MCP server** | Settings → *Let MCP clients on this PC control Nexus*, then `claude mcp add nexus -- node <Nexus>/scripts/nexus-mcp.js`: Claude Code can list machines and sessions, launch agents, send text and read their output. Loopback only, token in `~/.nexus/mcp.json`. |
+| **MCP server** | Settings → *Let MCP clients on this PC control Nexus*, then `claude mcp add nexus -- "<Nexus folder>/nexus-mcp"` (Settings shows the exact command): Claude Code can list machines and sessions, launch agents, send text and read their output. Loopback only, token in `~/.nexus/mcp.json`. |
 | **Auto-reconnect** | If a machine drops off the network, sessions show "reconnecting…" and reattach on their own (backoff up to 30 s). Nothing is lost: tmux kept them running. |
 | **Resizable splits** | Drag the divider between panes; double-click it to reset. |
 | **Send last reply** | Ctrl+Shift+S (or the ➤ button on an agent pane) puts the agent's latest answer into the broadcast composer, aimed at your other agents, ready to edit and send. |
@@ -76,7 +78,7 @@ the Share panel to use the older shared-account mode, where guests log in as eac
 **Owner, once:**
 1. **This PC on Tailscale**: Install Tailscale (opens `winget install Tailscale.Tailscale`), then sign in from the tray icon.
 2. **Machines on your tailnet**: "Join Tailscale" on each machine runs `sudo tailscale up --ssh` there; type the sudo password and open the login link it prints. Nexus then records each machine's tailnet address and falls back to it whenever the LAN address can't be reached (a **TS** badge shows on the card).
-3. **Tailscale credential**: preferably an **OAuth client** ([login.tailscale.com → Settings → OAuth clients](https://login.tailscale.com/admin/settings/oauth)) with the scopes `devices:core` (tag `tag:nexus-spark`), `policy_file` and `users`; paste its secret (`tskey-client-…`). It has only the rights Nexus needs and never expires (Nexus exchanges it for one-hour access tokens). The tag must exist before the client can be created: add `"tag:nexus-spark": ["autogroup:admin"]` to `tagOwners` in your policy file first, or do step 4 once with an API token. An **API access token** (`tskey-api-…`, [Settings → Keys](https://login.tailscale.com/admin/settings/keys)) also works, but carries your full admin rights and expires within 90 days. Either is stored encrypted with your OS account (DPAPI / Keychain / keyring) and never leaves the Nexus main process.
+3. **Tailscale credential**: preferably an **OAuth client** ([login.tailscale.com → Settings → OAuth clients](https://login.tailscale.com/admin/settings/oauth)) with the scopes `devices:core` (tag `tag:nexus-spark`), `policy_file` and `users`; paste its secret (`tskey-client-…`). It has only the rights Nexus needs and never expires (Nexus exchanges it for one-hour access tokens). The tag must exist before the client can be created: add `"tag:nexus-spark": ["autogroup:admin"]` to `tagOwners` in your policy file first, or do step 4 once with an API token. An **API access token** (`tskey-api-…`, [Settings → Keys](https://login.tailscale.com/admin/settings/keys)) also works, but carries your full admin rights and expires within 90 days. Either is stored in your OS keychain (Windows Credential Manager / macOS Keychain / a Secret Service keyring such as gnome-keyring or KWallet), never in `config.json`.
 4. **Access rules → Review**: shows exactly what changes in your tailnet policy, then **Apply**. Nexus validates the policy with Tailscale first and only saves it if nobody edited it meanwhile. It:
    - creates `tag:nexus-spark` and tags the shared machines with it (the name is kept for existing setups);
    - narrows any "everyone can reach everything" rule to admins (you), so guests can't reach your other devices;
@@ -117,8 +119,9 @@ Settings) and travels over each person's existing SSH connection, so there's no 
 
 | | |
 |---|---|
-| Local sessions | ConPTY via `node-pty` (PowerShell, Git Bash, `claude`, `agy`) |
-| Remote sessions | `ssh2`: one connection per machine, one channel per session, each in its own tmux session on a private tmux server (`tmux -L nexus`) configured to be invisible: no status bar, no mouse capture, native scrollback. |
+| The app | One Rust program: [egui](https://github.com/emilk/egui) draws the window, [alacritty_terminal](https://crates.io/crates/alacritty_terminal) is the terminal emulator. `nexus-mcp` beside it is the MCP stdio bridge. |
+| Local sessions | A pseudo-terminal (ConPTY on Windows) via `portable-pty` (PowerShell, Git Bash, `claude`, `agy`) |
+| Remote sessions | [`russh`](https://crates.io/crates/russh): one connection per machine, one channel per session, each in its own tmux session on a private tmux server (`tmux -L nexus`) configured to be invisible: no status bar, no mouse capture, native scrollback. |
 | SSH trust | Host keys are checked against `~/.ssh/known_hosts` (including hashed entries and `UserKnownHostsFile` from `~/.ssh/config`). A host key Nexus hasn't seen before asks you to confirm its fingerprint once (tailnet addresses, already authenticated by WireGuard, are pinned without asking); a changed key is refused. Keys come from Settings, `~/.ssh/config` `IdentityFile`s, the default key files, then the Windows OpenSSH agent. Passphrase-protected keys prompt once per run. |
 | Agent exits | You drop into your normal shell in the same pane. |
 | Config | `%APPDATA%\Nexus\config.json` (machines, presets, workspaces, appearance, pinned host keys) |
@@ -153,21 +156,47 @@ Edit `presets` in the config file, e.g. a project-specific command (`icon` picks
 { "id": "claude-proj", "name": "Claude · api", "color": "#E08A62", "icon": "claude", "cmd": { "linux": "cd ~/code/api && claude" } }
 ```
 
+## Upgrading from 1.x
+
+2.0 replaces the Electron app with a native Rust one. It reads the same `config.json`, so machines, presets, workspaces,
+the last session and pinned host keys carry over, and sessions left running in tmux reattach as before. A few things
+are different:
+
+- **Install it once by hand.** 1.x can't update itself to 2.0; download the installer from Releases. On Windows it
+  installs over the old version in the same folder. From 2.0 on, Nexus announces new versions itself (Windows: it
+  downloads the installer when you ask, checks it against the SHA-256 GitHub publishes for it, and runs it).
+- **Tailscale credential:** paste it again in Share. 1.x kept it encrypted in a way only Electron can read; 2.0 keeps
+  it in the OS keychain.
+- **MCP:** the bridge is now a program, not a Node script. Re-register it: `claude mcp remove nexus`, then the
+  `claude mcp add …` command Settings shows.
+- **Terminal text:** the font comes from Settings → Font family if it is installed on this computer (otherwise a
+  built-in monospace font). There are no ligatures or italics, colour emoji show as outlines or blanks, and input
+  methods (IME) for composing CJK text are not supported yet.
+- **Window:** the normal title bar of your OS. Clicking a notification no longer jumps to its session. Starting Nexus a
+  second time does nothing while it is already open.
+
 ## Development
 
 ```
-npm test        # unit tests (ssh_config, known_hosts, remote commands, alert hooks, config migration, team chat, invites, palette)
-npm run dist    # build dist/Nexus-Setup-<version>.exe
+cargo test            # unit tests, plus end-to-end tests of the SSH layer against an in-process SSH server (with tmux where installed)
+scripts/package.sh    # this platform's installer(s) into dist/  (Linux: .deb · macOS: .dmg/.zip · Windows: NSIS .exe, run from Git Bash)
 ```
 
-CI runs the tests on Windows, macOS and Linux on every push. To publish a release, bump `version` in `package.json` and push it to main (or push a matching tag, `git tag v1.3.1 && git push --tags`). The Release workflow builds the Windows, macOS and Linux installers into a **draft** release, then `verify-and-publish.yml` scans them: **VirusTotal** (~70 engines, every installer) and **Microsoft Defender** (Windows installer) must both be clean, and ClamAV ([hugoalh/scan-virus-ghaction](https://github.com/hugoalh/scan-virus-ghaction)) runs as a reported check. Only then is the release published, with the VirusTotal reports, the scan log and SHA-256 checksums in its notes. (The ClamAV bundled in that action, 1.0.3 with 2023 signatures, flags the official Electron runtime itself as `Win.Trojan.Virut`, so it can't gate an Electron app.) The workflow needs a `VT_API_KEY` repository secret. Installed copies update from it.
+Useful when working on the UI: `NEXUS_SCREENSHOT=shot.png cargo run` saves a picture of the window three seconds after
+start and quits (`NEXUS_OPEN=palette|settings|share|team|composer|workspaces` opens that view first;
+`NEXUS_CONFIG_DIR=<folder>` uses a config other than your own). It works under `xvfb-run`.
 
-**Code signing (optional):** add repository secrets and the Release workflow signs automatically; without them builds
-stay unsigned. Windows: `WIN_CSC_LINK` (base64 .pfx) + `WIN_CSC_KEY_PASSWORD`. macOS: `MAC_CSC_LINK` (base64 Developer ID
-.p12) + `MAC_CSC_KEY_PASSWORD`, plus `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID` for notarization.
-(New Windows OV/EV certificates are issued on hardware tokens or cloud HSMs; for those, configure electron-builder's
-`win.azureSignOptions` or a custom `win.sign` instead of a .pfx.) Workflow actions are pinned to commit SHAs and kept
-current by Dependabot.
+CI runs the tests on Windows, macOS and Linux on every push and builds the installers on pull requests. To publish a
+release, bump `version` in `Cargo.toml` and push it to main (or push a matching tag, `git tag v2.0.1 && git push --tags`).
+The Release workflow builds the Windows, macOS and Linux installers into a **draft** release, then
+`verify-and-publish.yml` scans them: **VirusTotal** (~70 engines, every installer) and **Microsoft Defender** (Windows
+installer) must both be clean, and ClamAV ([hugoalh/scan-virus-ghaction](https://github.com/hugoalh/scan-virus-ghaction))
+runs as a reported check. Only then is the release published, with the VirusTotal reports, the scan log and SHA-256
+checksums in its notes. The workflow needs a `VT_API_KEY` repository secret.
+
+**Code signing** is not wired into the Rust build yet: installers are unsigned (the macOS app is ad-hoc signed so it
+runs on Apple Silicon). Workflow actions are pinned to commit SHAs and kept current by Dependabot, which also watches
+the Rust dependencies.
 
 ## Credits
 

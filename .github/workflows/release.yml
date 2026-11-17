@@ -1,6 +1,6 @@
 name: Release
 
-# Push a tag like v1.3.0 (matching package.json "version"), or push a "version" bump in package.json to main, to build
+# Push a tag like v2.0.0 (matching "version" in Cargo.toml), or push a "version" bump in Cargo.toml to main, to build
 # installers for Windows, macOS and Linux. (A version bump on main releases v<version> unless that tag or release
 # already exists; the tag is created when the release is published.)
 # They are uploaded to a draft release, scanned (VirusTotal + Microsoft Defender block; ClamAV is reported), and the
@@ -10,13 +10,13 @@ on:
   push:
     tags: ['v*']
     branches: [main]
-    paths: [package.json, .github/workflows/release.yml]
+    paths: [Cargo.toml, .github/workflows/release.yml]
 
 permissions:
   contents: write
 
 jobs:
-  # Which release this run is for, and whether to make one at all (a package.json change that isn't a new version
+  # Which release this run is for, and whether to make one at all (a Cargo.toml change that isn't a new version
   # doesn't release).
   version:
     runs-on: ubuntu-latest
@@ -32,7 +32,7 @@ jobs:
           if [ "$GITHUB_REF_TYPE" = tag ]; then
             echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"; echo "go=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          tag="v$(node -p 'require("./package.json").version')"
+          tag="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null || gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "$tag already exists: nothing to release"; echo "go=false" >> "$GITHUB_OUTPUT"
@@ -58,57 +58,43 @@ jobs:
           TAG: ${{ needs.version.outputs.tag }}
 
   build:
-    needs: create
+    needs: [version, create]
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: windows-latest
-            args: --win
-          - os: macos-latest
-            args: --mac
-          - os: ubuntu-latest
-            args: --linux --x64
-          - os: ubuntu-24.04-arm
-            args: --linux --arm64
+        # Windows: Nexus-Setup-<v>.exe · macOS: .dmg/.zip for Apple Silicon and Intel · Linux: .deb for amd64 and arm64
+        os: [windows-latest, macos-latest, ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
+    env:
+      CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - run: npm test
-      # Code signing is used when its secrets exist, so updates and SmartScreen/Gatekeeper can verify the publisher.
-      # Without them the build stays unsigned, as before. Secrets: WIN_CSC_LINK + WIN_CSC_KEY_PASSWORD (Windows .pfx,
-      # base64), MAC_CSC_LINK + MAC_CSC_KEY_PASSWORD (Developer ID .p12, base64), APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD
-      # + APPLE_TEAM_ID (notarization).
-      - name: Build, sign (if configured) and upload installers
+      - name: Rust toolchain
+        shell: bash
+        run: rustup toolchain install stable --profile minimal && rustup default stable && rustc --version
+      - name: tmux (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq tmux
+      - name: Check the tag matches Cargo.toml
+        shell: bash
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          v="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          [ "$v" = "$TAG" ] || { echo "::error::Cargo.toml says $v but the release is $TAG"; exit 1; }
+      - run: cargo test --locked
+      # Builds are unsigned (the macOS app is ad-hoc signed so it runs on Apple Silicon). See README: Development.
+      - name: Build installers
+        shell: bash
+        run: scripts/package.sh
+      - name: Upload to the draft release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
-          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
-          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          for v in WIN_CSC_LINK WIN_CSC_KEY_PASSWORD CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
-            [ -n "${!v}" ] || unset "$v"
-          done
-          if [ "$RUNNER_OS" = macOS ] && [ -n "${CSC_LINK:-}" ]; then
-            # package.json pins mac.identity to null (unsigned); drop that for this build so the certificate is used.
-            node -e 'const f="package.json",p=require("./"+f);delete p.build.mac.identity;require("fs").writeFileSync(f,JSON.stringify(p,null,2))'
-            echo "Signing the macOS build"
-          fi
-          [ "$RUNNER_OS" = Windows ] && [ -n "${WIN_CSC_LINK:-}" ] && echo "Signing the Windows build"
-          npx electron-builder ${{ matrix.args }} --publish always
+          TAG: ${{ needs.version.outputs.tag }}
+        run: gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
 
   # VirusTotal + Microsoft Defender gate (blocking) and ClamAV (reported), then publish: see verify-and-publish.yml.
   verify:

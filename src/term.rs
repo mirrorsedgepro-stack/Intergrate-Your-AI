@@ -226,7 +226,7 @@ impl Terminal {
         let tilde = |n: u8| if mods > 1 { format!("\x1b[{n};{mods}~") } else { format!("\x1b[{n}~") };
         let ss3 = |ch: char| if mods > 1 { format!("\x1b[1;{mods}{ch}") } else { format!("\x1bO{ch}") };
         let s = match key {
-            Key::Enter => if m.shift && !m.ctrl && !m.alt { "\x1b\r".into() } else if m.alt { "\x1b\r".into() } else { "\r".into() }, // Shift+Enter: newline without submitting (Claude Code, agy)
+            Key::Enter => if m.alt || (m.shift && !m.ctrl) { "\x1b\r".into() } else { "\r".into() }, // Shift+Enter: newline without submitting (Claude Code, agy)
             Key::Tab => if m.shift { "\x1b[Z".into() } else { "\t".into() },
             Key::Backspace => if m.alt { "\x1b\x7f".into() } else if m.ctrl { "\x08".into() } else { "\x7f".into() },
             Key::Escape => "\x1b".into(),
@@ -370,7 +370,7 @@ impl Terminal {
             let is_bold = c.flags.contains(Flags::BOLD);
             let simple = ch.is_ascii() && c.zerowidth().is_none();
             match run.as_mut() {
-                Some(r) if simple && r.row == row && r.fg == fg && r.bold == is_bold && col >= r.last + 1 && col - r.last <= 8 => {
+                Some(r) if simple && r.row == row && r.fg == fg && r.bold == is_bold && col > r.last && col - r.last <= 8 => {
                     for _ in r.last + 1..col { r.text.push(' '); }
                     r.text.push(ch);
                     r.last = col;
