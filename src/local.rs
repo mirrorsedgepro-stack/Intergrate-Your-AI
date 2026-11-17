@@ -43,7 +43,7 @@ pub struct Pty {
 fn login_shell() -> String { std::env::var("SHELL").unwrap_or_else(|_| if IS_MAC { "/bin/zsh" } else { "/bin/bash" }.into()) }
 
 /// The program and arguments for a local session (separate from spawning, so it can be tested).
-pub fn command_line(s: &SpawnSpec) -> Result<(String, Vec<String>), String> {
+pub fn command_line(s: &SpawnSpec, shell: &str) -> Result<(String, Vec<String>), String> {
     let v = |a: &[&str]| a.iter().map(|x| (*x).to_string()).collect::<Vec<_>>();
     if let Some(distro) = &s.wsl {
         let inner = if s.cmd.is_empty() { "exec \"$SHELL\" -l".to_string() } else { format!("{}; exec \"$SHELL\" -l", s.cmd) };
@@ -64,7 +64,7 @@ pub fn command_line(s: &SpawnSpec) -> Result<(String, Vec<String>), String> {
         return Ok((ps, args));
     }
     // macOS / Linux: the user's login shell.
-    let shell = login_shell();
+    let shell = shell.to_string();
     let args = if let Some((file, extra)) = &s.script {
         let words: Vec<String> = std::iter::once(file.to_string_lossy().into_owned()).chain(extra.iter().cloned()).map(|w| shq(&w)).collect();
         v(&["-lic", &format!("bash {}; exec {} -l", words.join(" "), shq(&shell))])
@@ -73,7 +73,7 @@ pub fn command_line(s: &SpawnSpec) -> Result<(String, Vec<String>), String> {
 }
 
 pub fn spawn(s: &SpawnSpec) -> Result<Pty, String> {
-    let (program, args) = command_line(s)?;
+    let (program, args) = command_line(s, &login_shell())?;
     let mut cmd = CommandBuilder::new(program);
     cmd.args(args);
     cmd.env("TERM", "xterm-256color");
@@ -209,13 +209,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn unix_command_lines() {
-        std::env::set_var("SHELL", "/bin/bash");
-        let (p, a) = command_line(&SpawnSpec { cmd: "claude".into(), ..Default::default() }).unwrap();
+        let sh = "/bin/bash";
+        let (p, a) = command_line(&SpawnSpec { cmd: "claude".into(), ..Default::default() }, sh).unwrap();
         assert_eq!((p.as_str(), a), ("/bin/bash", vec!["-lic".to_string(), "claude; exec '/bin/bash' -l".to_string()]));
-        assert_eq!(command_line(&SpawnSpec::default()).unwrap().1, ["-l"]);
-        let (_, a) = command_line(&SpawnSpec { script: Some((PathBuf::from("/x/set up.sh"), vec!["host".into(), String::new(), "22".into()])), ..Default::default() }).unwrap();
+        assert_eq!(command_line(&SpawnSpec::default(), sh).unwrap().1, ["-l"]);
+        let (_, a) = command_line(&SpawnSpec { script: Some((PathBuf::from("/x/set up.sh"), vec!["host".into(), String::new(), "22".into()])), ..Default::default() }, sh).unwrap();
         assert_eq!(a[1], "bash '/x/set up.sh' 'host' '' '22'; exec '/bin/bash' -l");
-        let (p, a) = command_line(&SpawnSpec { cmd: "agy".into(), wsl: Some("Ubuntu".into()), ..Default::default() }).unwrap();
+        let (p, a) = command_line(&SpawnSpec { cmd: "agy".into(), wsl: Some("Ubuntu".into()), ..Default::default() }, sh).unwrap();
         assert_eq!(p, "wsl.exe");
         assert_eq!(a, ["-d", "Ubuntu", "--cd", "~", "-e", "bash", "-lic", "agy; exec \"$SHELL\" -l"]);
     }
@@ -223,7 +223,6 @@ mod tests {
     #[test]
     fn a_local_pty_runs_a_command_and_reports_its_output() {
         use std::io::Read;
-        std::env::set_var("SHELL", "/bin/sh");
         let mut pty = spawn(&SpawnSpec { cmd: "echo nexus-$((40+2)); exit 0".into(), cols: 80, rows: 24, ..Default::default() }).unwrap();
         let mut out = String::new();
         let mut buf = [0u8; 4096];

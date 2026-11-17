@@ -235,7 +235,7 @@ mod tests {
 
         // Wrong token: dropped before any method runs.
         let mut bad = std::net::TcpStream::connect(("127.0.0.1", srv.port)).unwrap();
-        writeln!(bad, "bad-token\n{}", json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })).unwrap();
+        let _ = writeln!(bad, "bad-token\n{}", json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })); // the server may already have hung up
         let mut any = String::new();
         let _ = std::io::BufReader::new(bad).read_line(&mut any);
         assert!(any.is_empty());

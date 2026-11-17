@@ -181,7 +181,7 @@ fn connect_trust_exec_upload_forward_and_refusals() {
         let p = r.machine.probe().await.unwrap();
         assert!(!p.hostname.is_empty() && p.tools.contains_key("tmux") && p.home == srv.home.to_string_lossy());
         let st = r.machine.stats().await.unwrap().unwrap();
-        assert!(st.cpus.unwrap_or(0.0) >= 1.0 && st.mem_total.is_some());
+        if cfg!(target_os = "linux") { assert!(st.cpus.unwrap_or(0.0) >= 1.0 && st.mem_total.is_some()); } // the stats script reads /proc
 
         // Uploads land in the private inbox, byte for byte (a buffer and a streamed file).
         let big: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
@@ -369,16 +369,17 @@ fn local_sessions_run_report_exit_and_feed_the_mcp_tools() {
     let rt = runtime();
     let handle = rt.handle().clone();
     rt.block_on(async {
-        std::env::set_var("SHELL", "/bin/sh");
         if std::env::var_os("NEXUS_CONFIG_DIR").is_none() { std::env::set_var("NEXUS_CONFIG_DIR", std::env::temp_dir().join(format!("nexus-cfg-{}", std::process::id()))); }
         let (tx, mut rx) = tokio::sync::mpsc::channel(4096);
         let be = Backend::new(handle, Config::default(), tx, Box::new(|| {}));
-        let spec = SessionSpec { machine_id: "local".into(), preset_id: "shell".into(), cols: 80, rows: 24, cwd: Some("/tmp".into()), ..Default::default() };
+        // Whatever the login shell and its prompt are, the session runs a quiet /bin/sh: no echo, no prompt.
+        let quiet = Some("stty -echo; PS1= PS2= exec /bin/sh".to_string());
+        let spec = SessionSpec { machine_id: "local".into(), preset_id: "shell".into(), cols: 80, rows: 24, cwd: Some("/tmp".into()), cmd: quiet.clone(), ..Default::default() };
         let (pid, tmux) = be.create_session(spec).await.unwrap();
         assert!(tmux.is_none(), "local sessions have no tmux");
         let mut term = crate::term::Terminal::new(80, 24);
-        be.write(pid, b"echo local-$((40+2)); pwd\n");
-        wait_for(&mut rx, pid, "local-42\n/tmp", &mut term).await;
+        be.write(pid, b"echo local-$((40+2)); basename \"$PWD\"\n");
+        wait_for(&mut rx, pid, "local-42\ntmp", &mut term).await;
         be.resize(pid, 100, 30);
         be.write(pid, b"stty size\n");
         wait_for(&mut rx, pid, "30 100", &mut term).await;
@@ -387,7 +388,7 @@ fn local_sessions_run_report_exit_and_feed_the_mcp_tools() {
         let list = be.mcp_call(crate::mcp::Call::ListSessions).await.unwrap();
         assert_eq!((list[0]["id"].as_str(), list[0]["preset"].as_str(), list[0]["machineId"].as_str()), (Some(&*format!("s{pid}")), Some("shell"), Some("local")));
         be.mcp_call(crate::mcp::Call::Send { session: format!("s{pid}"), text: "echo from-mcp\n".into() }).await.unwrap();
-        wait_for(&mut rx, pid, "from-mcp\nfrom-mcp", &mut term).await;
+        wait_for(&mut rx, pid, "from-mcp", &mut term).await;
         let out = be.mcp_call(crate::mcp::Call::ReadOutput { session: format!("s{pid}") }).await.unwrap();
         assert!(crate::mcp::plain(out.as_str().unwrap()).contains("local-42"));
         assert!(be.mcp_call(crate::mcp::Call::Send { session: "s999".into(), text: String::new() }).await.is_err());
@@ -398,7 +399,7 @@ fn local_sessions_run_report_exit_and_feed_the_mcp_tools() {
         be.write(pid, b"exit 7\n");
         let exited = async { loop { if let Some(Event::Exit { pid: p, code, disconnected }) = rx.recv().await { if p == pid { break (code, disconnected); } } } };
         assert_eq!(tokio::time::timeout(T, exited).await.unwrap(), (Some(7), false));
-        let (pid2, _) = be.create_session(SessionSpec { machine_id: "local".into(), preset_id: "shell".into(), cols: 80, rows: 24, ..Default::default() }).await.unwrap();
+        let (pid2, _) = be.create_session(SessionSpec { machine_id: "local".into(), preset_id: "shell".into(), cols: 80, rows: 24, cmd: quiet, ..Default::default() }).await.unwrap();
         be.close(pid2, false);
         assert!(be.mcp_call(crate::mcp::Call::ListSessions).await.unwrap().as_array().unwrap().is_empty());
     });
