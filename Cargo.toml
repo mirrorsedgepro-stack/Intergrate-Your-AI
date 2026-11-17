@@ -1,0 +1,61 @@
+[package]
+name = "nexus-terminal"
+version = "2.0.0"
+edition = "2021"
+rust-version = "1.85"
+description = "One terminal to orchestrate Claude, Antigravity, OpenClaw and shells across your machines (Windows, macOS, Linux, WSL)"
+authors = ["mirrorsedgepro-stack"]
+repository = "https://github.com/mirrorsedgepro-stack/Intergrate-Your-AI"
+homepage = "https://github.com/mirrorsedgepro-stack/Intergrate-Your-AI"
+license = "MIT"
+publish = false
+default-run = "nexus"
+
+[[bin]]
+name = "nexus"
+path = "src/main.rs"
+
+# MCP stdio bridge: `claude mcp add nexus -- <path>/nexus-mcp`
+[[bin]]
+name = "nexus-mcp"
+path = "src/bin/nexus-mcp.rs"
+
+[dependencies]
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+egui_extras = { version = "0.37", default-features = false, features = ["svg", "image"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+alacritty_terminal = "0.26"
+russh = { version = "0.65", default-features = false, features = ["ring", "flate2", "rsa"] }
+portable-pty = "0.9"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+ureq = { version = "3", features = ["json"] }
+arboard = "3"
+notify-rust = "4"
+keyring = "4"
+rfd = "0.18"
+open = "5"
+fontdb = "0.24"
+base64 = "0.23"
+sha1 = "0.11"
+sha2 = "0.11"
+hmac = "0.13"
+regex = "1"
+rand = "0.9"
+fd-lock = "4"
+dirs = "6"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true
+panic = "abort"
+
+[profile.dev]
+opt-level = 1
