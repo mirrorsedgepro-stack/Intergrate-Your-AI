@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Build Nexus.app and a .dmg from a finished release build (macOS only).
+# Build Nexus.app and zip it, from a finished release build (macOS only).
 #   scripts/package-macos.sh <version> <rust target, e.g. aarch64-apple-darwin> <arch label: arm64 | x64>
-# Output: dist/Nexus-<version>-mac-<arch>.dmg and .zip.
-# Signing: with MACOS_SIGN_IDENTITY set (a "Developer ID Application: …" certificate in the keychain) the app and
-# disk image are signed with the hardened runtime, and with APPLE_ID, APPLE_TEAM_ID and APPLE_APP_PASSWORD also set
-# they are notarized and stapled, so Gatekeeper opens them without a warning. Without those the app is ad-hoc signed
+# Output: dist/Nexus-<version>-mac-<arch>.zip (unzip, then drag Nexus into Applications). There is no disk image:
+# antivirus engines flagged the unsigned .dmg of 2.0.0 while passing the same app in the .zip.
+# Signing: with MACOS_SIGN_IDENTITY set (a "Developer ID Application: …" certificate in the keychain) the app is signed
+# with the hardened runtime, and with APPLE_ID, APPLE_TEAM_ID and APPLE_APP_PASSWORD also set
+# it is notarized and stapled, so Gatekeeper opens them without a warning. Without those the app is ad-hoc signed
 # (it runs, but the first time you right-click Nexus in Applications -> Open).
 set -euo pipefail
 version="$1"; target="$2"; arch="$3"
@@ -34,18 +35,15 @@ if [ -n "${MACOS_SIGN_IDENTITY:-}" ]; then
 else
   codesign --force --deep --sign - "$app"
 fi
-ln -s /Applications "$stage/Applications"
 name="Nexus-$version-mac-$arch"
 rm -f "$root/dist/$name.dmg" "$root/dist/$name.zip"
-hdiutil create -volname "Nexus $version" -srcfolder "$stage" -ov -format UDZO "$root/dist/$name.dmg" >/dev/null
-if [ -n "${MACOS_SIGN_IDENTITY:-}" ]; then
-  codesign --force --timestamp --sign "$MACOS_SIGN_IDENTITY" "$root/dist/$name.dmg"
-  if [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ] && [ -n "${APPLE_APP_PASSWORD:-}" ]; then
-    xcrun notarytool submit "$root/dist/$name.dmg" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
-    xcrun stapler staple "$root/dist/$name.dmg"
-    xcrun stapler staple "$app"
-  fi
+if [ -n "${MACOS_SIGN_IDENTITY:-}" ] && [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ] && [ -n "${APPLE_APP_PASSWORD:-}" ]; then
+  # Notarization takes an archive; the ticket is then stapled to the app itself, which is zipped again below.
+  (cd "$stage" && ditto -c -k --keepParent Nexus.app "$stage/notarize.zip")
+  xcrun notarytool submit "$stage/notarize.zip" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+  xcrun stapler staple "$app"
+  rm -f "$stage/notarize.zip"
 fi
 (cd "$stage" && ditto -c -k --keepParent Nexus.app "$root/dist/$name.zip")
 rm -rf "$stage"
-echo "dist/$name.dmg"
+echo "dist/$name.zip"

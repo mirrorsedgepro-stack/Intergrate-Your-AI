@@ -11,7 +11,7 @@ Download from [Releases](https://github.com/mirrorsedgepro-stack/Intergrate-Your
 | OS | File | Notes |
 |---|---|---|
 | Windows 10/11 | `Nexus-Setup-x.y.z.exe` | Tells you when a new version is out and installs it when you ask. Unsigned: SmartScreen asks once (More info → Run anyway). |
-| macOS (Apple Silicon / Intel) | `Nexus-x.y.z-mac-arm64.dmg` / `…-mac-x64.dmg` | Unsigned: the first time, right-click Nexus in Applications → Open. Nexus tells you when a new version is out. |
+| macOS (Apple Silicon / Intel) | `Nexus-x.y.z-mac-arm64.zip` / `…-mac-x64.zip` | Unzip and drag Nexus into Applications. Unsigned: the first time, right-click Nexus in Applications → Open. Nexus tells you when a new version is out. |
 | Linux x86_64 / arm64 (Debian, Ubuntu, DGX OS…) | `Nexus-x.y.z-linux-amd64.deb` / `…-linux-arm64.deb` | `sudo apt install ./Nexus-*.deb`. Other distros: run from source. |
 
 **From source** (any OS, [Rust](https://rustup.rs) 1.85+):
@@ -170,7 +170,7 @@ are different:
 - **Install it once by hand.** 1.x can't update itself to 2.0; download the installer from Releases. On Windows it
   installs over the old version in the same folder. From 2.0 on, Nexus announces new versions itself and, when
   you ask, downloads the installer and checks it against the SHA-256 GitHub publishes for it. Windows then runs it;
-  macOS opens the disk image for you to drag across; Linux installs the `.deb` through the system's password prompt
+  macOS unpacks the zip for you to drag across; Linux installs the `.deb` through the system's password prompt
   (when Nexus was installed from a `.deb`; otherwise the file is left in Downloads).
 - **Tailscale credential:** paste it again in Share. 1.x kept it encrypted in a way only Electron can read; 2.0 keeps
   it in the OS keychain.
@@ -188,7 +188,7 @@ are different:
 
 ```
 cargo test            # unit tests, plus end-to-end tests of the SSH layer against an in-process SSH server (with tmux where installed)
-scripts/package.sh    # this platform's installer(s) into dist/  (Linux: .deb · macOS: .dmg/.zip · Windows: NSIS .exe, run from Git Bash)
+scripts/package.sh    # this platform's installer(s) into dist/  (Linux: .deb · macOS: .zip · Windows: NSIS .exe, run from Git Bash)
 ```
 
 Useful when working on the UI: `NEXUS_SCREENSHOT=shot.png cargo run` saves a picture of the window three seconds after
@@ -199,15 +199,18 @@ CI runs the tests on Windows, macOS and Linux on every push and builds the insta
 release, bump `version` in `Cargo.toml` and push it to main (or push a matching tag, `git tag v2.0.1 && git push --tags`).
 The Release workflow builds the Windows, macOS and Linux installers into a **draft** release, then
 `verify-and-publish.yml` scans them: **VirusTotal** (~70 engines, every installer) and **Microsoft Defender** (Windows
-installer) must both be clean, and ClamAV ([hugoalh/scan-virus-ghaction](https://github.com/hugoalh/scan-virus-ghaction))
+installer) must both pass, and ClamAV ([hugoalh/scan-virus-ghaction](https://github.com/hugoalh/scan-virus-ghaction))
 runs as a reported check. Only then is the release published, with the VirusTotal reports, the scan log and SHA-256
-checksums in its notes. The workflow needs a `VT_API_KEY` repository secret.
+checksums in its notes. VirusTotal passes a file with no detections, or with exactly one whose name marks it as a
+heuristic or machine-learning guess (such as `…!ml` or plain `Malicious`) rather than a named threat; that detection is
+listed in the release notes. Two detections on one file, or one naming a threat family, block the release. The
+workflow needs a `VT_API_KEY` repository secret.
 
 **Code signing** switches on when its repository secrets exist; without them installers are unsigned (the macOS app is
 ad-hoc signed so it runs on Apple Silicon). Windows (Authenticode): `WINDOWS_CERT_PFX_BASE64` (the .pfx, base64) and
 `WINDOWS_CERT_PASSWORD` sign both programs and the installer. macOS (Developer ID): `MACOS_CERT_P12_BASE64`,
-`MACOS_CERT_PASSWORD` and `MACOS_SIGN_IDENTITY` (e.g. `Developer ID Application: Your Name (TEAMID)`) sign the app and
-disk image with the hardened runtime; adding `APPLE_ID`, `APPLE_TEAM_ID` and `APPLE_APP_PASSWORD` (an app-specific
+`MACOS_CERT_PASSWORD` and `MACOS_SIGN_IDENTITY` (e.g. `Developer ID Application: Your Name (TEAMID)`) sign the app
+with the hardened runtime; adding `APPLE_ID`, `APPLE_TEAM_ID` and `APPLE_APP_PASSWORD` (an app-specific
 password) notarizes and staples them. The signing steps have not been run yet: no certificates were available.
 Workflow actions are pinned to commit SHAs and kept current by Dependabot, which also watches
 the Rust dependencies.
