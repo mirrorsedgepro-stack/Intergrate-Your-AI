@@ -4,7 +4,7 @@ name: Release
 # installers for Windows, macOS and Linux. (A version bump on main releases v<version> unless that tag or release
 # already exists; the tag is created when the release is published.)
 # They are uploaded to a draft release, scanned (VirusTotal + Microsoft Defender block; ClamAV is reported), and the
-# release is published only if the blocking scans are clean.
+# release is published only if the blocking scans pass (see verify-and-publish.yml for what VirusTotal may report).
 # Installed copies of Nexus then pick it up automatically.
 on:
   push:
@@ -52,7 +52,7 @@ jobs:
         run: |
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" --title "${TAG#v}" \
-            --notes "Nexus ${TAG#v}. Windows: Nexus-Setup-*.exe · macOS: *-mac-arm64.dmg (Apple Silicon) or *-mac-x64.dmg (Intel) · Linux: .deb (x86_64 / arm64)."
+            --notes "Nexus ${TAG#v}. Windows: Nexus-Setup-*.exe · macOS: *-mac-arm64.zip (Apple Silicon) or *-mac-x64.zip (Intel) · Linux: .deb (x86_64 / arm64)."
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.version.outputs.tag }}
@@ -62,7 +62,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Windows: Nexus-Setup-<v>.exe · macOS: .dmg/.zip for Apple Silicon and Intel · Linux: .deb for amd64 and arm64
+        # Windows: Nexus-Setup-<v>.exe · macOS: .zip for Apple Silicon and Intel · Linux: .deb for amd64 and arm64
         os: [windows-latest, macos-latest, ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     env:

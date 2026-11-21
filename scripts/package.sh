@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the release binaries and this platform's installer(s) into dist/.
 #   Linux:   dist/Nexus-<version>-linux-<amd64|arm64>.deb                (needs cargo-deb; installed if missing)
-#   macOS:   dist/Nexus-<version>-mac-<arm64|x64>.dmg and .zip           (both architectures)
+#   macOS:   dist/Nexus-<version>-mac-<arm64|x64>.zip                    (both architectures)
 #   Windows: dist/Nexus-Setup-<version>.exe                              (needs NSIS's makensis; run from Git Bash)
 # Code signing is optional and switches on when the certificates are there: WINDOWS_CERT_PFX (path to a .pfx) with
 # WINDOWS_CERT_PASSWORD signs the programs and the installer; see scripts/package-macos.sh for macOS.

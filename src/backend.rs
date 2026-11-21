@@ -733,7 +733,7 @@ impl Backend {
             }
         });
     }
-    /// Download this platform's installer for a release (Windows setup, macOS disk image, Linux .deb) and check it
+    /// Download this platform's installer for a release (Windows setup, macOS zip, Linux .deb) and check it
     /// against the SHA-256 GitHub publishes for the asset. Returns its path; the caller decides how to run it.
     pub async fn download_update(&self, version: String) -> Result<PathBuf, String> { self.blocking(move || fetch_installer(&version)).await? }
     /// Linux: install a downloaded .deb with the system's own password prompt (pkexec).
@@ -767,8 +767,8 @@ fn latest_release() -> Option<(String, String)> {
 pub fn installer_name(version: &str, os: &str, arch: &str) -> Option<String> {
     match (os, arch) {
         ("windows", _) => Some(format!("Nexus-Setup-{version}.exe")),
-        ("macos", "aarch64") => Some(format!("Nexus-{version}-mac-arm64.dmg")),
-        ("macos", "x86_64") => Some(format!("Nexus-{version}-mac-x64.dmg")),
+        ("macos", "aarch64") => Some(format!("Nexus-{version}-mac-arm64.zip")),
+        ("macos", "x86_64") => Some(format!("Nexus-{version}-mac-x64.zip")),
         ("linux", "x86_64") => Some(format!("Nexus-{version}-linux-amd64.deb")),
         ("linux", "aarch64") => Some(format!("Nexus-{version}-linux-arm64.deb")),
         _ => None,
@@ -843,7 +843,7 @@ mod tests {
     #[test]
     fn installer_per_platform() {
         assert_eq!(installer_name("2.1.0", "windows", "x86_64").as_deref(), Some("Nexus-Setup-2.1.0.exe"));
-        assert_eq!(installer_name("2.1.0", "macos", "aarch64").as_deref(), Some("Nexus-2.1.0-mac-arm64.dmg"));
+        assert_eq!(installer_name("2.1.0", "macos", "aarch64").as_deref(), Some("Nexus-2.1.0-mac-arm64.zip"));
         assert_eq!(installer_name("2.1.0", "linux", "aarch64").as_deref(), Some("Nexus-2.1.0-linux-arm64.deb"));
         assert_eq!(installer_name("2.1.0", "freebsd", "x86_64"), None);
     }

@@ -410,7 +410,7 @@ impl App {
                 });
             }));
         } else if crate::backend::installer_name(&version, std::env::consts::OS, std::env::consts::ARCH).is_some() {
-            // macOS: the verified disk image is opened for you to drag across. Linux: the verified .deb is installed
+            // macOS: the verified zip is opened (unpacked beside itself) for you to drag across. Linux: the verified .deb is installed
             // through the system's password prompt when Nexus itself came from a .deb; otherwise it is left in Downloads.
             let v = version.clone();
             self.toast_action(format!("Nexus {version} is available."), 60_000, "Download", act(move |app| {
@@ -418,7 +418,7 @@ impl App {
                 let (be, v2, url) = (app.be.clone(), v.clone(), url.clone());
                 app.be.run(async move { be.download_update(v2).await }, move |app, r| match r {
                     Err(e) => { app.toast_bad(format!("{e}. Opening the release page instead.")); crate::platform::open_external(&url); }
-                    Ok(path) if IS_MAC => { let _ = open::that_detached(&path); app.toast(format!("Downloaded and checked {}. Quit Nexus, then drag the new one into Applications.", path.display()), OK, 30_000); }
+                    Ok(path) if IS_MAC => { let _ = open::that_detached(&path); app.toast(format!("Downloaded, checked and unpacked {}. Quit Nexus, then drag the new Nexus from that folder into Applications.", path.display()), OK, 30_000); }
                     Ok(path) => {
                         let from_deb = std::env::current_exe().is_ok_and(|p| p.starts_with("/usr/bin"));
                         if !from_deb { app.toast(format!("Downloaded and checked {}", path.display()), OK, 30_000); return; }
