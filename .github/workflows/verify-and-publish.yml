@@ -1,18 +1,17 @@
 name: Verify and publish
 
-# Scans a draft release's installers and publishes it only if they're clean.
-#   Blocking:  VirusTotal (~70 engines) on every installer, Microsoft Defender on the Windows installer.
-#   Reported:  ClamAV via hugoalh/scan-virus-ghaction (its bundled ClamAV has 2023 signatures and has produced false
-#              positives before, so it doesn't block; its result is shown in the notes).
+# Scans a draft release's installers and publishes it if the blocking scan is clean.
+#   Blocking:  Microsoft Defender (current signatures) on the Windows installer.
+#   Reported:  ClamAV via hugoalh/scan-virus-ghaction on every installer (its bundled ClamAV has 2023 signatures and
+#              has produced false positives before, so it doesn't block; its result is shown in the notes).
+# VirusTotal is no longer part of a release: single-engine heuristic verdicts on the unsigned Windows installer held
+# back 2.0.0 and 2.0.1. The manual "VirusTotal check" workflow (virustotal.yml) still gives a multi-engine verdict.
 # Runs after every release build (called from release.yml) or manually for an existing draft.
 on:
   workflow_call:
     inputs:
       tag:
         type: string
-        required: true
-    secrets:
-      VT_API_KEY:
         required: true
   workflow_dispatch:
     inputs:
@@ -80,77 +79,8 @@ jobs:
           path: defender.md
           overwrite: true
 
-  virustotal:
-    runs-on: ubuntu-latest
-    env:
-      VT: ${{ secrets.VT_API_KEY }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - name: Download installers
-        run: |
-          [ -n "$VT" ] || { echo "::error::The VT_API_KEY repository secret is missing"; exit 1; }
-          mkdir -p dl && gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir dl \
-            --pattern '*.exe' --pattern '*.dmg' --pattern '*.zip' --pattern '*.AppImage' --pattern '*.deb'
-          ls -la dl
-      - name: VirusTotal
-        run: |
-          set -uo pipefail
-          api=https://www.virustotal.com/api/v3
-          # The free API allows 4 requests/minute and occasionally returns 429/5xx: every call retries with backoff
-          # instead of aborting the job (curl -f under bash -e used to kill the whole scan on one transient error).
-          vt() { # vt <curl args...> ; prints the body, fails only after 6 attempts
-            local i body code
-            for i in 1 2 3 4 5 6; do
-              body=$(curl -s -w '\n%{http_code}' -H "x-apikey: $VT" "$@") || { sleep $((i*20)); continue; }
-              code=${body##*$'\n'}; body=${body%$'\n'*}
-              case "$code" in
-                2??) printf '%s' "$body"; return 0 ;;
-                404) return 44 ;;
-                429|5??) echo "  VT HTTP $code, retrying in $((i*20))s" >&2; sleep $((i*20)) ;;
-                *) echo "  VT HTTP $code" >&2; return 1 ;;
-              esac
-            done
-            return 1
-          }
-          bad=0; n=0
-          : > vt.md
-          for f in dl/*; do
-            n=$((n+1))
-            name=$(basename "$f"); sha=$(sha256sum "$f" | cut -d' ' -f1)
-            echo "== $name  $sha"
-            if ! vt "$api/files/$sha" > report.json; then
-              url=$(vt "$api/files/upload_url" | jq -r .data) || { echo "upload_url failed"; bad=1; continue; }
-              id=$(vt -F "file=@$f" "$url" | jq -r .data.id) || { echo "upload failed"; bad=1; continue; }
-              [ -n "$id" ] && [ "$id" != null ] || { echo "upload failed"; bad=1; continue; }
-              for i in $(seq 1 60); do
-                sleep 30
-                st=$(vt "$api/analyses/$id" | jq -r .data.attributes.status) || st=
-                [ "$st" = "completed" ] && break
-              done
-              sleep 20
-              vt "$api/files/$sha" > report.json || { echo "no report"; bad=1; continue; }
-            fi
-            mal=$(jq '.data.attributes.last_analysis_stats.malicious' report.json)
-            sus=$(jq '.data.attributes.last_analysis_stats.suspicious' report.json)
-            tot=$(jq '.data.attributes.last_analysis_stats | .malicious + .suspicious + .undetected + .harmless' report.json)
-            echo "malicious=$mal suspicious=$sus engines=$tot"
-            jq -r '.data.attributes.last_analysis_results | to_entries[] | select(.value.category=="malicious" or .value.category=="suspicious") | "  \(.key): \(.value.category) \(.value.result)"' report.json
-            echo "| $name | $mal / $tot | [report](https://www.virustotal.com/gui/file/$sha) |" >> vt.md
-            [ "$mal" = "0" ] || bad=1
-            sleep 16 # free API: 4 requests/minute
-          done
-          cat vt.md
-          [ "$(grep -c '^| ' vt.md)" = "$n" ] || { echo "::error::vt.md has fewer rows than installers"; bad=1; }
-          [ "$bad" = "0" ] || { echo "::error::VirusTotal flagged a file (or a check failed); not publishing"; exit 1; }
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: always()
-        with:
-          name: virustotal
-          path: vt.md
-          overwrite: true # a re-run replaces the previous attempt's (possibly partial) table
-
   publish:
-    needs: [clamav, defender, virustotal]
+    needs: [clamav, defender]
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -164,11 +94,6 @@ jobs:
           mkdir -p dl && gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir dl \
             --pattern '*.exe' --pattern '*.dmg' --pattern '*.zip' --pattern '*.AppImage' --pattern '*.deb'
           (cd dl && sha256sum *) > SHA256SUMS.txt
-      - name: Check scan results cover every installer
-        run: |
-          # A re-run of a failed job can hand publish the previous attempt's partial artifact: refuse it.
-          want=$(ls dl | wc -l); have=$(grep -c '^| ' results/vt.md)
-          [ "$have" = "$want" ] || { echo "::error::VirusTotal table lists $have of $want installers; re-run the verify jobs"; exit 1; }
       - name: Publish release with scan results
         env:
           CLAM_FOUND: ${{ needs.clamav.outputs.found }}
@@ -179,16 +104,12 @@ jobs:
           if [ "$CLAM_OUTCOME" = success ] && [ "$CLAM_FOUND" != True ] && [ "$CLAM_FOUND" != true ]; then
             clam="- ClamAV ([hugoalh/scan-virus-ghaction](https://github.com/hugoalh/scan-virus-ghaction)): no threats"
           else
-            clam="- ClamAV ([hugoalh/scan-virus-ghaction](https://github.com/hugoalh/scan-virus-ghaction), bundled ClamAV 1.0.3 with 2023 signatures): reported a finding or did not complete; see the scan log. The engines above found nothing."
+            clam="- ClamAV ([hugoalh/scan-virus-ghaction](https://github.com/hugoalh/scan-virus-ghaction), bundled ClamAV 1.0.3 with 2023 signatures): reported a finding or did not complete; see the scan log. Microsoft Defender found nothing."
           fi
           {
             echo
             echo "### Security scan"
             echo "Every installer was checked before this release was published ([scan log]($run)):"
-            echo
-            echo "| File | VirusTotal (malicious / engines) | Report |"
-            echo "|---|---|---|"
-            cat results/vt.md
             echo
             cat results/defender.md
             echo "$clam"
