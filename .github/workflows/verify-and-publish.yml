@@ -2,10 +2,6 @@ name: Verify and publish
 
 # Scans a draft release's installers and publishes it only if they're clean.
 #   Blocking:  VirusTotal (~70 engines) on every installer, Microsoft Defender on the Windows installer.
-#              VirusTotal passes a file with no detections, or with exactly one whose name says it is a heuristic /
-#              machine-learning guess (e.g. "…!ml", "Malicious", "Heur…") rather than a named threat: unsigned new
-#              builds draw one of those now and then. Such a detection is still listed in the release notes. Two
-#              detections on a file, or one that names a threat family, block the release.
 #   Reported:  ClamAV via hugoalh/scan-virus-ghaction (its bundled ClamAV has 2023 signatures and has produced false
 #              positives before, so it doesn't block; its result is shown in the notes).
 # Runs after every release build (called from release.yml) or manually for an existing draft.
@@ -116,10 +112,8 @@ jobs:
             done
             return 1
           }
-          # A lone detection is let through only if its name matches this (heuristic / machine-learning labels).
-          heur='(!ml$|(^|[^a-z])ml([^a-z]|$)|heur|suspicious|^malicious$|unsafe|(^|[^a-z])ai([^a-z]|$)|aidetect|score|confidence)'
           bad=0; n=0
-          : > vt.md; : > vt-allowed.md
+          : > vt.md
           for f in dl/*; do
             n=$((n+1))
             name=$(basename "$f"); sha=$(sha256sum "$f" | cut -d' ' -f1)
@@ -142,21 +136,9 @@ jobs:
             echo "malicious=$mal suspicious=$sus engines=$tot"
             jq -r '.data.attributes.last_analysis_results | to_entries[] | select(.value.category=="malicious" or .value.category=="suspicious") | "  \(.key): \(.value.category) \(.value.result)"' report.json
             echo "| $name | $mal / $tot | [report](https://www.virustotal.com/gui/file/$sha) |" >> vt.md
-            if [ "$mal" = "1" ]; then
-              det=$(jq -r '.data.attributes.last_analysis_results | to_entries[] | select(.value.category=="malicious") | "\(.key): \(.value.result)"' report.json)
-              if printf '%s' "${det#*: }" | grep -qiE "$heur"; then
-                echo "  allowed: a single heuristic detection"
-                echo "- \`$name\`: one heuristic detection, which the release gate allows: $det" >> vt-allowed.md
-              else
-                bad=1
-              fi
-            elif [ "$mal" != "0" ]; then
-              bad=1
-            fi
+            [ "$mal" = "0" ] || bad=1
             sleep 16 # free API: 4 requests/minute
           done
-          # The allowances go under the table (its rows must stay together), so the release notes show them.
-          [ -s vt-allowed.md ] && { echo; cat vt-allowed.md; } >> vt.md
           cat vt.md
           [ "$(grep -c '^| ' vt.md)" = "$n" ] || { echo "::error::vt.md has fewer rows than installers"; bad=1; }
           [ "$bad" = "0" ] || { echo "::error::VirusTotal flagged a file (or a check failed); not publishing"; exit 1; }

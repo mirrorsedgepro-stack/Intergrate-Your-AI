@@ -199,12 +199,9 @@ CI runs the tests on Windows, macOS and Linux on every push and builds the insta
 release, bump `version` in `Cargo.toml` and push it to main (or push a matching tag, `git tag v2.0.1 && git push --tags`).
 The Release workflow builds the Windows, macOS and Linux installers into a **draft** release, then
 `verify-and-publish.yml` scans them: **VirusTotal** (~70 engines, every installer) and **Microsoft Defender** (Windows
-installer) must both pass, and ClamAV ([hugoalh/scan-virus-ghaction](https://github.com/hugoalh/scan-virus-ghaction))
+installer) must both be clean, and ClamAV ([hugoalh/scan-virus-ghaction](https://github.com/hugoalh/scan-virus-ghaction))
 runs as a reported check. Only then is the release published, with the VirusTotal reports, the scan log and SHA-256
-checksums in its notes. VirusTotal passes a file with no detections, or with exactly one whose name marks it as a
-heuristic or machine-learning guess (such as `…!ml` or plain `Malicious`) rather than a named threat; that detection is
-listed in the release notes. Two detections on one file, or one naming a threat family, block the release. The
-workflow needs a `VT_API_KEY` repository secret.
+checksums in its notes. The workflow needs a `VT_API_KEY` repository secret.
 
 **Code signing** switches on when its repository secrets exist; without them installers are unsigned (the macOS app is
 ad-hoc signed so it runs on Apple Silicon). Windows (Authenticode): `WINDOWS_CERT_PFX_BASE64` (the .pfx, base64) and
