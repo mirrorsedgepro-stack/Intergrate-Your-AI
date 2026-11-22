@@ -50,7 +50,7 @@ impl server::Handler for Srv {
         let finish = move |handle: server::Handle, rt: tokio::runtime::Handle, code: u32| rt.block_on(async { let _ = handle.exit_status_request(channel, code).await; let _ = handle.eof(channel).await; let _ = handle.close(channel).await; });
         if let Some((cols, rows)) = self.pty.lock().unwrap().get(&channel).copied() {
             let pair = portable_pty::native_pty_system().openpty(portable_pty::PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).unwrap();
-            let mut cb = portable_pty::CommandBuilder::new("/bin/bash");
+            let mut cb = portable_pty::CommandBuilder::new(login_shell());
             cb.args(["-c", &cmd]);
             for (k, v) in self.envs() { cb.env(k, v); }
             cb.cwd(&self.home);
@@ -67,7 +67,7 @@ impl server::Handler for Srv {
                 finish(handle, rt, code);
             });
         } else {
-            let mut child = std::process::Command::new("/bin/bash").args(["-c", &cmd]).envs(self.envs()).current_dir(&self.home)
+            let mut child = std::process::Command::new(login_shell()).args(["-c", &cmd]).envs(self.envs()).current_dir(&self.home)
                 .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
             self.procs.lock().unwrap().insert(channel, Proc::Pipe(child.stdin.take()));
             let (mut out, mut err) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
@@ -446,6 +446,10 @@ fn local_sessions_run_report_exit_and_feed_the_mcp_tools() {
         assert!(be.mcp_call(crate::mcp::Call::ListSessions).await.unwrap().as_array().unwrap().is_empty());
     });
 }
+
+/// The shell the test server runs every command through, as sshd does with the account's login shell. Set
+/// NEXUS_TEST_LOGIN_SHELL to a fish (or csh, zsh…) binary to run these tests against an account that uses it.
+fn login_shell() -> String { std::env::var("NEXUS_TEST_LOGIN_SHELL").unwrap_or_else(|_| "/bin/bash".into()) }
 
 /// Not a test: keeps the in-process SSH server up so the app itself can be pointed at it (screenshots, hand checks).
 ///   NEXUS_SERVE_SECS=60 NEXUS_SERVE_INFO=/tmp/serve.json cargo test serve_for_hand_checks -- --ignored

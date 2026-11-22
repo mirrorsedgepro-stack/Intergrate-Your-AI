@@ -1,6 +1,6 @@
 [package]
 name = "nexus-terminal"
-version = "2.0.1"
+version = "2.0.2"
 edition = "2021"
 rust-version = "1.85"
 description = "One terminal to orchestrate Claude, Antigravity, OpenClaw and shells across your machines (Windows, macOS, Linux, WSL)"
