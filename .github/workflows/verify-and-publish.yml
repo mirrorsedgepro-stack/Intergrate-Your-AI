@@ -37,7 +37,7 @@ jobs:
         run: |
           mkdir -p "$GITHUB_WORKSPACE/release"
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$GITHUB_WORKSPACE/release" \
-            --pattern '*.exe' --pattern '*.dmg' --pattern '*.zip' --pattern '*.AppImage' --pattern '*.deb'
+            --pattern '*.exe' --pattern '*.dmg' --pattern '*.zip' --pattern '*.AppImage' --pattern '*.deb' --pattern '*.apk'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Scan Virus
@@ -92,7 +92,7 @@ jobs:
       - name: Checksums
         run: |
           mkdir -p dl && gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir dl \
-            --pattern '*.exe' --pattern '*.dmg' --pattern '*.zip' --pattern '*.AppImage' --pattern '*.deb'
+            --pattern '*.exe' --pattern '*.dmg' --pattern '*.zip' --pattern '*.AppImage' --pattern '*.deb' --pattern '*.apk'
           (cd dl && sha256sum *) > SHA256SUMS.txt
       - name: Publish release with scan results
         env:

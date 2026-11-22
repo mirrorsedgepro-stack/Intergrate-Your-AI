@@ -31,14 +31,24 @@ impl App {
     pub(super) fn draw_titlebar(&mut self, ui: &mut egui::Ui) {
         let mut todo: Vec<Act> = Vec::new();
         egui::Panel::top("titlebar").exact_size(42.0).frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin::symmetric(10, 0))).show(ui, |ui| {
+            let compact = self.compact;
             ui.horizontal_centered(|ui| {
-                ui.label(RichText::new("◆").color(BRAND).size(15.0));
-                ui.label(RichText::new("nexus").strong().size(14.0));
-                ui.add_space(8.0);
+                if compact {
+                    // A phone: the machine list is a drawer behind this button, and the rest lives in the palette.
+                    let waiting_dot = !self.drawer && self.team.unread > 0;
+                    let r = icon_btn_c(ui, if self.drawer { "x" } else { "menu" }, "Machines", if self.drawer { BRAND } else { TEXT }, 18.0);
+                    if waiting_dot { ui.painter().circle_filled(r.rect.right_top() + Vec2::new(-4.0, 5.0), 3.0, BAD); }
+                    if r.clicked() { todo.push(act(App::toggle_drawer)); }
+                } else {
+                    ui.label(RichText::new("◆").color(BRAND).size(15.0));
+                    ui.label(RichText::new("nexus").strong().size(14.0));
+                    ui.add_space(8.0);
+                }
                 // Right side first, so the tabs get what is left.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
                     for (n, name, tip) in [(4u8, "layout4", "Grid"), (2, "layout2", "Side by side"), (1, "layout1", "Single")] {
+                        if compact { break; }
                         if icon_btn_c(ui, name, &format!("{tip} · Layout (Ctrl+Shift+L)"), if self.layout == n { BRAND } else { TEXT3 }, 15.0).clicked() { todo.push(act(move |a| a.set_layout(n))); }
                     }
                     ui.add_space(6.0);
@@ -47,8 +57,8 @@ impl App {
                     let r = icon_btn_c(ui, "inbox", "Fleet: every agent, and the ones waiting for you (Ctrl+Shift+A)", if waiting > 0 { WARN } else { TEXT2 }, 15.0);
                     if waiting > 0 { ui.painter().text(r.rect.right_top() + Vec2::new(-2.0, 3.0), egui::Align2::CENTER_CENTER, if waiting > 9 { "9+".to_string() } else { waiting.to_string() }, FontId::proportional(9.5), WARN); }
                     if r.clicked() { todo.push(act(App::open_fleet)); }
-                    if icon_btn(ui, "layout", "Workspaces (Ctrl+Shift+O)").clicked() { todo.push(act(App::open_workspaces)); }
-                    if icon_btn(ui, "people", "Share machines over Tailscale").clicked() { todo.push(act(App::open_share)); }
+                    if !compact && icon_btn(ui, "layout", "Workspaces (Ctrl+Shift+O)").clicked() { todo.push(act(App::open_workspaces)); }
+                    if !compact && icon_btn(ui, "people", "Share machines over Tailscale").clicked() { todo.push(act(App::open_share)); }
                     let r = icon_btn_c(ui, "chat", "Team chat (Ctrl+Shift+M)", if self.team.live { OK } else { TEXT2 }, 15.0);
                     if self.team.unread > 0 { ui.painter().text(r.rect.right_top() + Vec2::new(-2.0, 3.0), egui::Align2::CENTER_CENTER, if self.team.unread > 9 { "9+".to_string() } else { self.team.unread.to_string() }, FontId::proportional(9.5), BAD); }
                     if r.clicked() { todo.push(act(App::toggle_team)); }
@@ -68,8 +78,10 @@ impl App {
                                             None => logo_img(ui, &self.preset_icon(&s.preset_id, Some(&s.machine_id)), 14.0),
                                         }
                                         ui.label(RichText::new(&s.name).color(if active { TEXT } else { TEXT2 }));
-                                        ui.label(dim(self.machine(&s.machine_id).name).size(11.0));
-                                        if i < 9 { ui.label(RichText::new(format!("^{}", i + 1)).monospace().size(9.5).color(TEXT3)); }
+                                        if !compact {
+                                            ui.label(dim(self.machine(&s.machine_id).name).size(11.0));
+                                            if i < 9 { ui.label(RichText::new(format!("^{}", i + 1)).monospace().size(9.5).color(TEXT3)); }
+                                        }
                                         if icon_btn_c(ui, "x", "", TEXT3, 10.0).clicked() { todo.push(act(move |a| a.close_session(id, false))); }
                                     });
                                 }); }).response;
@@ -111,7 +123,9 @@ impl App {
     // ---------------------------------------------------------------- sidebar
     pub(super) fn draw_sidebar(&mut self, ui: &mut egui::Ui) {
         let mut todo: Vec<Act> = Vec::new();
-        egui::Panel::left("sidebar").exact_size(264.0).frame(egui::Frame::new().fill(BG2).inner_margin(8)).show(ui, |ui| {
+        // On a phone the list is the whole screen while it is open (the terminal behind keeps its size).
+        let width = if self.compact { ui.available_width() } else { 264.0 };
+        egui::Panel::left("sidebar").exact_size(width).frame(egui::Frame::new().fill(BG2).inner_margin(8)).show(ui, |ui| {
             egui::Panel::bottom("sidebar-foot").frame(egui::Frame::new()).show(ui, |ui| {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
@@ -297,6 +311,7 @@ impl App {
             if self.status_of(&m) == Status::Online { items.push(mi("Disconnect", act(move |x| x.disconnect_machine(&a)))); } else { items.push(mi("Connect", act(move |x| x.connect_machine(&a, false)))); }
             let (a, b, c, d) = (id.clone(), id.clone(), id.clone(), id.clone());
             items.push(mi("Set up SSH key…", act(move |x| x.setup_key(&a))).icon(Icon::Glyph("key")));
+            if IS_ANDROID { items.push(mi("Copy this device's public key", act(App::copy_device_key)).icon(Icon::Glyph("key"))); }
             items.push(mi("Install tools (tmux, Claude, Antigravity, OpenClaw)…", act(move |x| x.bootstrap(&b))).icon(Icon::Glyph("box")));
             items.push(mi("Enable Claude alerts", act(move |x| x.enable_alerts(&c))).icon(Icon::Glyph("bell")));
             let e = id.clone();
@@ -327,8 +342,8 @@ impl App {
             let width = ui.available_width().min(820.0);
             ui.vertical_centered(|ui| {
                 ui.set_max_width(width);
-                ui.add_space(40.0);
-                ui.label(RichText::new("One terminal. Every agent.").size(28.0).family(medium()));
+                ui.add_space(if self.compact { 16.0 } else { 40.0 });
+                ui.label(RichText::new("One terminal. Every agent.").size(if self.compact { 22.0 } else { 28.0 }).family(medium()));
                 ui.label(RichText::new("Claude, Antigravity, OpenClaw and shells on every machine on your LAN, side by side.").color(TEXT2));
                 ui.add_space(18.0);
                 for m in self.machines_sorted() {
@@ -339,7 +354,7 @@ impl App {
                             ui.label(RichText::new(&m.name).strong());
                             dot(ui, self.status_of(&m));
                             let sub = if m.is_ssh() { if m.host.is_empty() { "not configured".to_string() } else { format!("{}{}", if m.user.is_empty() { String::new() } else { format!("{}@", m.user) }, m.host) } }
-                                else if m.is_wsl() { format!("WSL · {}", m.distro) } else { format!("this computer · {}", os_label(&m.os)) };
+                                else if m.is_wsl() { format!("WSL · {}", m.distro) } else if IS_ANDROID { "this device · Android".to_string() } else { format!("this computer · {}", os_label(&m.os)) };
                             ui.label(dim(sub));
                         });
                         ui.horizontal_wrapped(|ui| {
@@ -365,7 +380,10 @@ impl App {
                     });
                 }
                 ui.add_space(14.0);
-                egui::Grid::new("keys").num_columns(2).spacing([16.0, 7.0]).show(ui, |ui| {
+                if self.touch {
+                    ui.label(RichText::new("Tap a launcher to start. In a terminal: drag to scroll, press and hold to select, copy or open a link. The search button finds everything else.").color(TEXT2));
+                }
+                if !self.touch { egui::Grid::new("keys").num_columns(2).spacing([16.0, 7.0]).show(ui, |ui| {
                     for (k, what) in [
                         ("Ctrl+Shift+P", "Command palette: launch or switch anything"), ("Ctrl+1…9", "Jump to session"), ("Ctrl+Shift+L", "Cycle layout: single, split, grid"),
                         ("Ctrl+Shift+A", "Fleet: every agent at a glance, and answer the ones waiting for you"),
@@ -373,7 +391,7 @@ impl App {
                         ("Ctrl+Shift+O", "Workspaces: saved layouts of agents and folders"), ("Ctrl+Shift+S", "Send an agent's last reply to another agent"),
                         ("Ctrl+C / Ctrl+V", "Copy / paste text or screenshots; drop files onto a pane to attach them"),
                     ] { ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| key_hint(ui, k)); ui.label(RichText::new(what).color(TEXT2)); ui.end_row(); }
-                });
+                }); }
                 ui.add_space(30.0);
             });
         });

@@ -41,7 +41,8 @@ impl App {
     }
 
     fn pane_rects(&self, area: Rect) -> Vec<Rect> {
-        let a = area.shrink(PAD);
+        // A phone gives the terminal every column it can.
+        let a = area.shrink(if self.compact { 3.0 } else { PAD });
         let x = a.left() + (a.width() - GUTTER) * self.split.0;
         let y = a.top() + (a.height() - GUTTER) * self.split.1;
         match self.layout {
@@ -114,7 +115,7 @@ impl App {
                     let r = icon_btn(ui, "more", "More");
                     if r.clicked() { let pos = r.rect.left_bottom() + Vec2::new(0.0, 4.0); todo = Some(act(move |a| a.term_menu(pos, id))); }
                     let single = self.layout == 1;
-                    if icon_btn(ui, "split", if single { "Split side by side" } else { "Move to next pane" }).clicked() { todo = Some(act(move |a| if single { a.split_with(id) } else { a.move_to_next_pane(id) })); }
+                    if !self.compact && icon_btn(ui, "split", if single { "Split side by side" } else { "Move to next pane" }).clicked() { todo = Some(act(move |a| if single { a.split_with(id) } else { a.move_to_next_pane(id) })); }
                     if icon_btn(ui, "search", "Find (Ctrl+Shift+F)").clicked() { todo = Some(act(move |a| a.open_search(id))); }
                     if is_agent(&s.preset_id) && icon_btn(ui, "send", "Send last reply to another agent (Ctrl+Shift+S)").clicked() { todo = Some(act(move |a| a.send_last_reply(id))); }
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -145,7 +146,7 @@ impl App {
             });
         });
         if bg.clicked() { self.focus_pane(i); }
-        if bg.double_clicked() { self.focus_pane(i); self.set_layout(if self.layout == 1 { 2 } else { 1 }); }
+        if bg.double_clicked() && !self.compact { self.focus_pane(i); self.set_layout(if self.layout == 1 { 2 } else { 1 }); }
         if let Some(a) = todo { a(self); }
     }
 
@@ -165,8 +166,14 @@ impl App {
             resp.request_focus();
             ui.memory_mut(|m| m.set_focus_lock_filter(widget, egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true }));
         }
-        let (pos, pressed, down, released, mods, wheel) = ui.input(|inp| (inp.pointer.latest_pos(), inp.pointer.primary_pressed(), inp.pointer.primary_down(), inp.pointer.primary_released(), inp.modifiers, inp.smooth_scroll_delta.y));
-        let over = resp.contains_pointer();
+        let (pos, pressed, down, released, mods, mut wheel) = ui.input(|inp| (inp.pointer.latest_pos(), inp.pointer.primary_pressed(), inp.pointer.primary_down(), inp.pointer.primary_released(), inp.modifiers, inp.smooth_scroll_delta.y));
+        // Fingers: a drag scrolls, a long press selects a word (keep the finger down and move to extend it; lifting
+        // it opens the menu with Copy), and a tap goes to the program when it uses the mouse.
+        let touch = self.touch;
+        let (tapped, long_press) = (touch && resp.clicked(), touch && resp.long_touched());
+        let show_keyboard = !(touch && self.kb_hidden);
+        let mut over = resp.contains_pointer();
+        if touch && resp.dragged() && self.sessions.get(&id).is_some_and(|s| !s.term.is_dragging()) { wheel += resp.drag_delta().y; over = true; }
         if over { ui.ctx().set_cursor_icon(egui::CursorIcon::Text); }
         let mut out: Vec<Vec<u8>> = Vec::new();
         let (mut copy_on_select, mut open_url, mut tip, mut menu_at) = (false, None, false, None);
@@ -176,7 +183,20 @@ impl App {
             if let Some(p) = pos {
                 let (col, row, side) = s.term.cell_at(rect, cell, Pos2::new(p.x.clamp(rect.left(), rect.right() - 1.0), p.y.clamp(rect.top(), rect.bottom() - 1.0)));
                 let app_mouse = s.term.mouse_mode() && !mods.shift;
-                if pressed && over {
+                if touch {
+                    if long_press && !s.term.is_dragging() {
+                        s.last_pointer = now;
+                        self.link_at_press = url_at(&s.term.visible_line(row), col as usize);
+                        s.term.start_selection(col, row, side, 2);
+                    } else if tapped {
+                        s.last_pointer = now;
+                        if app_mouse { out.extend(s.term.mouse_report(MouseKind::Press, 0, col, row, mods)); out.extend(s.term.mouse_report(MouseKind::Release, 0, col, row, mods)); } else { s.term.clear_selection(); }
+                    } else if down && s.term.is_dragging() {
+                        s.term.drag_selection(col, row, side);
+                        if p.y < rect.top() { s.term.scroll(1); } else if p.y > rect.bottom() { s.term.scroll(-1); }
+                        ui.ctx().request_repaint();
+                    }
+                } else if pressed && over {
                     s.last_pointer = now;
                     if app_mouse {
                         // The program owns the mouse (Claude's full-screen UI): plain clicks and drags go to it.
@@ -199,7 +219,12 @@ impl App {
                 }
                 if released {
                     if s.mouse_cell.take().is_some() { out.extend(s.term.mouse_report(MouseKind::Release, 0, col, row, mods)); s.last_pointer = now; }
-                    else if s.term.is_dragging() { s.term.end_selection(); s.last_pointer = now; copy_on_select = s.term.has_selection(); }
+                    else if s.term.is_dragging() {
+                        s.term.end_selection();
+                        s.last_pointer = now;
+                        copy_on_select = s.term.has_selection();
+                        if touch { menu_at = Some(p); }
+                    }
                 }
                 if over && wheel != 0.0 {
                     s.scroll_acc += wheel;
@@ -212,11 +237,11 @@ impl App {
                     }
                 }
             } else if released { s.mouse_cell = None; s.term.end_selection(); }
-            if resp.secondary_clicked() { s.last_pointer = now; menu_at = resp.interact_pointer_pos(); }
+            if resp.secondary_clicked() && !touch { s.last_pointer = now; menu_at = resp.interact_pointer_pos(); }
 
             let blink_on = now - s.last_input < 600 || (now / 530) % 2 == 0;
             s.term.paint(&ui.painter_at(body), rect, &self.font.id, self.font.bold.as_ref(), cell, self.font.row_h, owns_kb, s.color, blink_on);
-            if owns_kb {
+            if owns_kb && show_keyboard {
                 // Input methods (Chinese, Japanese, Korean, dead keys…): tell the system where the cursor is so its
                 // candidate window sits there, and show the text being composed until it is committed.
                 if let Some((col, row)) = s.term.cursor_cell() {
@@ -236,7 +261,7 @@ impl App {
         }
         if is_focus { self.last_cells = (cols, rows); }
         if let Some(pid) = resized { self.be.resize(pid, cols, rows); }
-        if pressed && over { self.focus_pane(i); self.menu = None; self.focus_terminal(); }
+        if (pressed && over && !touch) || tapped { self.focus_pane(i); self.menu = None; self.focus_terminal(); self.kb_hidden = false; }
         let sent = !out.is_empty();
         for b in out { if let Some(pid) = self.sessions.get(&id).and_then(|s| s.pid) { self.be.write(pid, &b); } }
         if sent { if let Some(s) = self.sessions.get_mut(&id) { s.last_input = now; } }
@@ -296,14 +321,23 @@ impl App {
         let Some(s) = self.sessions.get(&id) else { return };
         let sel = s.term.selection_text();
         let has_sel = sel.is_some();
-        let mut items = vec![
+        let mut items = Vec::new();
+        // A long press on a link (touch screens have no Ctrl+click): opening it is always the user's own choice.
+        if let Some(url) = self.link_at_press.take() {
+            let (open, copy) = (url.clone(), url.clone());
+            items.push(MenuItem::Header(crate::util::clip(&url, 46)));
+            items.push(mi("Open link", act(move |_| { crate::platform::open_external(&open); })));
+            items.push(mi("Copy link", act(move |a| { a.ctx.copy_text(copy.clone()); a.toast_ok("Link copied"); })));
+            items.push(MenuItem::Sep);
+        }
+        items.extend([
             mi("Copy", act(move |a| { a.copy_selection(id); })).kbd("Ctrl+C").disabled(!has_sel),
-            mi("Paste", act(move |a| { a.ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste); a.show(id); })).kbd("Ctrl+V"),
+            mi("Paste", act(move |a| { a.show(id); a.request_paste(); })).kbd("Ctrl+V"),
             mi("Select all", act(move |a| { if let Some(s) = a.sessions.get_mut(&id) { s.term.select_all(); } })),
             mi("Find…", act(move |a| a.open_search(id))).kbd("Ctrl+Shift+F"),
             mi("Send last reply to…", act(move |a| a.send_last_reply(id))).kbd("Ctrl+Shift+S").icon(Icon::Glyph("send")),
             mi("Clear scrollback", act(move |a| { if let Some(s) = a.sessions.get_mut(&id) { s.term.clear_scrollback(); } })),
-        ];
+        ]);
         let others: Vec<&Session> = self.ordered().into_iter().filter(|o| *o != id).filter_map(|o| self.sessions.get(&o)).filter(|o| o.status == SessStatus::Running).collect();
         if !others.is_empty() {
             items.push(MenuItem::Sep);

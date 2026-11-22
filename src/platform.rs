@@ -5,6 +5,8 @@ use std::time::Duration;
 
 pub const IS_WIN: bool = cfg!(windows);
 pub const IS_MAC: bool = cfg!(target_os = "macos");
+/// Android: a phone or tablet. Local sessions are the device's own shell, and the layout adapts to a narrow screen.
+pub const IS_ANDROID: bool = cfg!(target_os = "android");
 
 /// Nexus's machine "os" values: windows | mac | linux.
 pub fn platform_os() -> &'static str { if IS_WIN { "windows" } else if IS_MAC { "mac" } else { "linux" } }
@@ -109,7 +111,7 @@ pub fn which_in(cmd: &str, env_path: &std::ffi::OsStr) -> Option<PathBuf> {
 /// installed in ~/.local/bin or Homebrew isn't found. Ask the user's login shell for its PATH once at startup
 /// (before any other thread exists: it changes this process's environment).
 pub fn load_login_shell_path() -> bool {
-    if IS_WIN { return false; }
+    if IS_WIN || IS_ANDROID { return false; }
     let shell = std::env::var("SHELL").unwrap_or_else(|_| if IS_MAC { "/bin/zsh" } else { "/bin/bash" }.into());
     let mut c = command(&shell);
     c.args(["-ilc", r#"printf "__NEXUS_PATH__%s__NEXUS_PATH__" "$PATH""#]).env("DISABLE_AUTO_UPDATE", "true");
@@ -172,8 +174,19 @@ pub fn wsl_exec(distro: &str, script: &str, timeout: Duration) -> (i32, String, 
 /// (file:, smb:, custom protocol handlers) is a path to running something the user didn't choose.
 pub fn open_external(url: &str) -> bool {
     let ok = (url.starts_with("https://") || url.starts_with("http://")) && !url.chars().any(|c| c.is_control() || c.is_whitespace());
+    #[cfg(not(target_os = "android"))]
     if ok { let _ = open::that_detached(url); }
+    #[cfg(target_os = "android")]
+    if ok { crate::android::open_url(url); }
     ok
+}
+
+/// Open a file of the user's own (the settings file, a downloaded installer) in whatever the system uses for it.
+pub fn open_path(path: &Path) -> bool {
+    #[cfg(not(target_os = "android"))]
+    { open::that_detached(path).is_ok() }
+    #[cfg(target_os = "android")]
+    { let _ = path; false } // app-private storage: no other app could read it
 }
 
 #[cfg(test)]

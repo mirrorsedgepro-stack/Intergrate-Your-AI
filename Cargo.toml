@@ -1,6 +1,6 @@
 [package]
 name = "nexus-terminal"
-version = "2.0.2"
+version = "2.1.0"
 edition = "2021"
 rust-version = "1.85"
 description = "One terminal to orchestrate Claude, Antigravity, OpenClaw and shells across your machines (Windows, macOS, Linux, WSL)"
@@ -9,6 +9,12 @@ repository = "https://github.com/mirrorsedgepro-stack/Intergrate-Your-AI"
 homepage = "https://github.com/mirrorsedgepro-stack/Intergrate-Your-AI"
 publish = false
 default-run = "nexus"
+
+# The app itself is a library so Android can load it as a shared object (scripts/package-android.sh builds it with
+# --crate-type cdylib); the desktop program below is a thin wrapper around it.
+[lib]
+name = "nexus_app"
+path = "src/lib.rs"
 
 [[bin]]
 name = "nexus"
@@ -32,10 +38,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 ureq = { version = "3", features = ["json"] }
-notify-rust = "4"
-keyring = "4"
-rfd = "0.18"
-open = "5"
 fontdb = "0.24"
 base64 = "0.23"
 sha1 = "0.11"
@@ -47,6 +49,20 @@ fd-lock = "4"
 dirs = "7"
 sysinfo = { version = "0.40", default-features = false, features = ["system", "disk", "network"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+# Desktop integrations with no Android counterpart (Android gets its own in src/android.rs).
+[target.'cfg(not(target_os = "android"))'.dependencies]
+notify-rust = "4"
+keyring = "4"
+rfd = "0.18"
+open = "5"
+
+[target.'cfg(target_os = "android")'.dependencies]
+eframe = { version = "0.37", default-features = false, features = ["android-native-activity"] }
+android-activity = { version = "0.6", features = ["native-activity"] }
+jni = "0.22"
+ndk-context = "0.1"
+libc = "0.2"
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

@@ -7,6 +7,7 @@ mod panes;
 mod sessions;
 mod share;
 mod team;
+mod touch;
 
 use crate::backend::{Backend, Event, TunnelInfo};
 use crate::config::{Config, Machine, Preset};
@@ -56,6 +57,7 @@ pub fn tint(c: Color32, a: f32) -> Color32 {
     Color32::from_rgb(m(c.r(), PANEL.r()), m(c.g(), PANEL.g()), m(c.b(), PANEL.b()))
 }
 pub const IS_MAC: bool = cfg!(target_os = "macos");
+pub use crate::platform::IS_ANDROID;
 /// Key hints: ⌘/⌥ on macOS.
 pub fn kbd(s: &str) -> String { if IS_MAC { s.replace("Ctrl+Shift+", "⌘⇧").replace("Ctrl+Alt+", "⌘⌥").replace("Ctrl+", "⌘") } else { s.to_string() } }
 
@@ -107,6 +109,8 @@ fn style(ctx: &egui::Context) {
 fn load_fonts(ctx: &egui::Context, families: &str) -> bool {
     let mut db = fontdb::Database::new();
     db.load_system_fonts();
+    #[cfg(target_os = "android")]
+    db.load_fonts_dir("/system/fonts");
     let mut defs = egui::FontDefinitions::default();
     let add = |defs: &mut egui::FontDefinitions, name: &str, family: &str, weight: fontdb::Weight| -> bool {
         let q = fontdb::Query { families: &[fontdb::Family::Name(family)], weight, ..Default::default() };
@@ -236,6 +240,20 @@ pub struct App {
     stats_busy: bool,
     screenshot: Option<(std::path::PathBuf, i64)>,
     typed: bool,
+    // phones and touch screens (see touch.rs)
+    /// The window is phone-narrow: one pane, and the machine list becomes a drawer over it.
+    pub compact: bool,
+    /// Fingers instead of a mouse: drag scrolls, a long press selects, and a row of terminal keys sits above the keyboard.
+    pub touch: bool,
+    pub drawer: bool,
+    pub sticky_ctrl: bool,
+    pub sticky_alt: bool,
+    /// The on-screen keyboard was put away with the keys row (a tap on the terminal brings it back).
+    pub kb_hidden: bool,
+    /// The web link under the last long press, offered at the top of the menu it opens.
+    pub link_at_press: Option<String>,
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pending_events: Vec<egui::Event>,
 }
 
 impl App {
@@ -255,6 +273,8 @@ impl App {
             palette: None, settings: None, dialogs: vec![], composer: None, menu: None, share: None, fleet: None, replay: None, last_alert: None, preedit: String::new(), team: team::Team::default(), toasts: vec![],
             t_activity: 0, t_stats: now_ms(), t_refresh: now_ms(), t_heartbeat: now_ms(), persist_at: None, save_at: None, stats_busy: false,
             screenshot: std::env::var_os("NEXUS_SCREENSHOT").map(|p| (p.into(), now_ms() + 3000)), typed: false,
+            // NEXUS_TOUCH=1: try the touch controls on a desktop.
+            compact: false, touch: crate::platform::IS_ANDROID || std::env::var_os("NEXUS_TOUCH").is_some(), drawer: false, sticky_ctrl: false, sticky_alt: false, kb_hidden: false, link_at_press: None, pending_events: vec![],
         };
         app.apply_font();
         app.boot();
@@ -318,8 +338,19 @@ impl App {
     pub fn toast_bad(&mut self, msg: impl Into<String>) { self.toast(msg, BAD, 6000); }
     pub fn toast_action(&mut self, msg: impl Into<String>, ms: i64, label: &str, a: Act) { self.toasts.push(Toast { msg: msg.into(), color: OK, until: now_ms() + ms, action: Some((label.into(), a)) }); }
 
+    /// Android runs Nexus only while it is on screen, so an alert is shown in the app; phone alerts (Settings) cover
+    /// the time it is not.
+    #[cfg(target_os = "android")]
+    pub fn notify(&mut self, title: &str, body: &str, session: Option<u64>) {
+        let text = crate::util::clip(&if body.is_empty() { title.to_string() } else { format!("{title}: {body}") }, 300);
+        match session {
+            Some(id) => self.toast_action(text, 10_000, "Show", act(move |app| app.jump_to(id))),
+            None => self.toast(text, OK, 10_000),
+        }
+    }
     /// A desktop notification. With a session, clicking it brings Nexus forward on that session (Linux desktops
     /// report the click; on Windows and macOS coming back to Nexus right after the alert does the same).
+    #[cfg(not(target_os = "android"))]
     pub fn notify(&mut self, title: &str, body: &str, session: Option<u64>) {
         let (title, body) = (crate::util::clip(title, 120), crate::util::clip(body, 300));
         if let Some(id) = session { self.last_alert = Some((id, now_ms())); }
@@ -376,6 +407,7 @@ impl App {
             Ok("workspaces") => self.open_workspaces(),
             Ok("menu") => self.machine_menu(egui::pos2(240.0, 90.0), "linux"),
             Ok("fleet") => self.open_fleet(),
+            Ok("drawer") => self.drawer = true,
             Ok("prompts") => self.open_picker(overlays::PalSource::Prompts, ""),
             Ok("replay") => { if let Some(m) = self.cfg.machines.iter().find(|m| m.is_ssh()).map(|m| m.id.clone()) { self.be.run(async { tokio::time::sleep(std::time::Duration::from_millis(1500)).await }, move |app, ()| app.open_replay(&m)); } }
             _ => {}
@@ -442,7 +474,7 @@ impl App {
                 let (be, v2, url) = (app.be.clone(), v.clone(), url.clone());
                 app.be.run(async move { be.download_update(v2).await }, move |app, r| match r {
                     Err(e) => { app.toast_bad(format!("{e}. Opening the release page instead.")); crate::platform::open_external(&url); }
-                    Ok(path) if IS_MAC => { let _ = open::that_detached(&path); app.toast(format!("Downloaded, checked and unpacked {}. Quit Nexus, then drag the new Nexus from that folder into Applications.", path.display()), OK, 30_000); }
+                    Ok(path) if IS_MAC => { crate::platform::open_path(&path); app.toast(format!("Downloaded, checked and unpacked {}. Quit Nexus, then drag the new Nexus from that folder into Applications.", path.display()), OK, 30_000); }
                     Ok(path) => {
                         let from_deb = std::env::current_exe().is_ok_and(|p| p.starts_with("/usr/bin"));
                         if !from_deb { app.toast(format!("Downloaded and checked {}", path.display()), OK, 30_000); return; }
@@ -505,6 +537,12 @@ impl App {
 }
 
 impl eframe::App for App {
+    #[cfg(target_os = "android")]
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) { self.android_input(raw); }
+    // The strips under the system bars are never painted by a panel: give them the window colour.
+    #[cfg(target_os = "android")]
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] { BG.to_normalized_gamma_f32() }
+
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let focused = ctx.input(|i| i.focused);
         // Windows and macOS don't say that a notification was clicked: coming back to Nexus within 20 s of one is
@@ -526,19 +564,27 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.measure_font();
+        self.set_compact(ui.ctx().content_rect().width() < touch::COMPACT_WIDTH);
         self.handle_keyboard();
         self.handle_drops();
         self.draw_titlebar(ui);
-        self.draw_statusbar(ui);
-        self.draw_sidebar(ui);
+        // A phone has no room for the hints, and the machine list or team chat take the whole screen when open.
+        if !self.compact { self.draw_statusbar(ui); }
+        let side = self.compact && (self.drawer || self.team.open);
+        if !self.compact || (self.drawer && !self.team.open) { self.draw_sidebar(ui); }
         self.draw_team(ui);
-        self.draw_composer(ui);
+        if !side {
+            self.draw_composer(ui);
+            if self.touch { self.draw_keys_row(ui); }
+        }
         self.replay_tick();
         egui::CentralPanel::default().frame(egui::Frame::new().fill(BG)).show(ui, |ui| {
+            if side { return; }
             if self.ordered().is_empty() { self.draw_welcome(ui); } else { self.draw_panes(ui); }
         });
         self.draw_overlays();
         self.draw_toasts();
+        self.sync_clipboard();
         if let Some((path, at)) = self.screenshot.clone() {
             // Debug aid (NEXUS_SCREENSHOT=file.png): save a picture of the window a moment after start, then quit.
             // NEXUS_TYPE=text: typed into the focused session a second before the picture is taken.
@@ -583,6 +629,7 @@ pub fn key_hint(ui: &mut egui::Ui, text: &str) {
 /// Line icons (the same drawings the Electron renderer used), as white SVGs tinted when drawn.
 const ICONS: &[(&str, &str)] = &[
     ("x", r#"<path d="M6 6l12 12M18 6L6 18"/>"#),
+    ("menu", r#"<path d="M4 7h16M4 12h16M4 17h16"/>"#),
     ("refresh", r#"<path d="M20 11a8 8 0 0 0-14.6-4.5M4 4v4h4M4 13a8 8 0 0 0 14.6 4.5M20 20v-4h-4"/>"#),
     ("plug", r#"<path d="M9 2v5M15 2v5M6 7h12v4a6 6 0 0 1-12 0zM12 17v5"/>"#),
     ("more", r##"<circle fill="#fff" stroke="none" cx="5" cy="12" r="1.6"/><circle fill="#fff" stroke="none" cx="12" cy="12" r="1.6"/><circle fill="#fff" stroke="none" cx="19" cy="12" r="1.6"/>"##),

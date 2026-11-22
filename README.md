@@ -13,6 +13,7 @@ Download from [Releases](https://github.com/mirrorsedgepro-stack/Intergrate-Your
 | Windows 10/11 | `Nexus-Setup-x.y.z.exe` | Tells you when a new version is out and installs it when you ask. Unsigned: SmartScreen asks once (More info → Run anyway). |
 | macOS (Apple Silicon / Intel) | `Nexus-x.y.z-mac-arm64.zip` / `…-mac-x64.zip` | Unzip and drag Nexus into Applications. Unsigned: the first time, right-click Nexus in Applications → Open. Nexus tells you when a new version is out. |
 | Linux x86_64 / arm64 (Debian, Ubuntu, DGX OS…) | `Nexus-x.y.z-linux-amd64.deb` / `…-linux-arm64.deb` | `sudo apt install ./Nexus-*.deb`. Other distros: run from source. |
+| Android 8.0+ (phones, tablets, Chromebooks) | `Nexus-x.y.z-android.apk` | Open the file on the device and allow your browser or file manager to install apps when Android asks. Nexus tells you when a new version is out and opens the release page. See [Android](#android). |
 
 **From source** (any OS, [Rust](https://rustup.rs) 1.85+):
 
@@ -32,6 +33,28 @@ Nexus is a single native program written in Rust: no Electron, no Node, no brows
   always reaches the terminal. Nexus loads your login shell's PATH, so tools from Homebrew or `~/.local/bin` are found
   even when launched from Finder.
 - **Linux:** local sessions use your login shell; shortcuts as on Windows (Ctrl+Shift+…).
+- **Android:** see below.
+
+### Android
+
+The same app, laid out for a phone: one terminal at a time, with the machine list behind the ☰ button (tablets and
+unfolded phones wide enough get the desktop layout).
+
+- **Touch:** drag to scroll, tap to type, press and hold to select (keep the finger down and move to extend); lifting
+  it opens the menu with Copy, Paste and, on a web link, Open link. A row of keys above the keyboard has what on-screen
+  keyboards lack: Esc, Tab, arrows, Ctrl and Alt (they apply to the next key), Paste, and a button to put the
+  keyboard away. Back closes whatever is open, or shows the machine list.
+- **Connecting to a machine:** Android has no `ssh` programs, so **Set up SSH key** works inside Nexus: it makes a
+  key for the device (kept in the app's private storage), asks for the machine's password once, signs in with it and
+  adds the key to `~/.ssh/authorized_keys`. The password is not saved. *Copy this device's public key* (machine
+  menu) is there for adding it by hand. Tailscale SSH machines need no key: run the Tailscale app on the device.
+- **This device:** the local machine is Android's own shell (`/system/bin/sh`) inside the app's sandbox. Claude,
+  Antigravity and OpenClaw run on your machines, not on the phone.
+- **What differs from the desktop:** workspaces are exported and imported through the clipboard instead of a file;
+  the Tailscale credential is kept in the app's private storage (there is no desktop keychain), excluded from
+  backups; there is no MCP bridge; alerts are shown in the app, because Android only runs Nexus while it is on screen
+  (use *Phone alerts* for the rest, and sessions keep running in tmux and reattach when you come back). The
+  on-screen keyboard types Latin text; other scripts and emoji need a hardware keyboard or Paste for now.
 
 ## First-time setup for a Linux machine
 
@@ -195,18 +218,20 @@ is [Inter](https://rsms.me/inter/), bundled from `assets/fonts` under the SIL Op
 ```
 cargo test            # unit tests, plus end-to-end tests of the SSH layer against an in-process SSH server (with tmux where installed)
 scripts/package.sh    # this platform's installer(s) into dist/  (Linux: .deb · macOS: .zip · Windows: NSIS .exe, run from Git Bash)
+scripts/package-android.sh   # dist/Nexus-<version>-android.apk (needs the Android SDK and NDK: ANDROID_HOME, ANDROID_NDK_HOME)
 ```
 
 Useful when working on the UI: `NEXUS_SCREENSHOT=shot.png cargo run` saves a picture of the window three seconds after
 start and quits (`NEXUS_OPEN=palette|settings|share|team|composer|workspaces|fleet|prompts|replay` opens that view first;
 `NEXUS_CONFIG_DIR=<folder>` uses a config other than your own). It works under `xvfb-run`.
+`NEXUS_WINDOW=412x892 NEXUS_TOUCH=1` shows the phone layout and touch controls on a desktop.
 
 `scripts/ui-drive.py` (Linux, needs `python-xlib`) sends real mouse and keyboard events to a copy of Nexus running under
 Xvfb and takes screenshots, for checking that controls respond: `python3 scripts/ui-drive.py :97 focus click:150,335 shot:out.png`.
 
 CI runs the tests on Windows, macOS and Linux on every push and builds the installers on pull requests. To publish a
 release, bump `version` in `Cargo.toml` and push it to main (or push a matching tag, `git tag v2.0.1 && git push --tags`).
-The Release workflow builds the Windows, macOS and Linux installers into a **draft** release, then
+The Release workflow builds the Windows, macOS and Linux installers and the Android APK into a **draft** release, then
 `verify-and-publish.yml` scans them: **Microsoft Defender** (Windows installer) must be clean, and ClamAV
 ([hugoalh/scan-virus-ghaction](https://github.com/hugoalh/scan-virus-ghaction)) runs on every installer as a reported
 check. Only then is the release published, with the scan results, the scan log and SHA-256 checksums in its notes.
@@ -219,7 +244,12 @@ ad-hoc signed so it runs on Apple Silicon). Windows (Authenticode): `WINDOWS_CER
 `WINDOWS_CERT_PASSWORD` sign both programs and the installer. macOS (Developer ID): `MACOS_CERT_P12_BASE64`,
 `MACOS_CERT_PASSWORD` and `MACOS_SIGN_IDENTITY` (e.g. `Developer ID Application: Your Name (TEAMID)`) sign the app
 with the hardened runtime; adding `APPLE_ID`, `APPLE_TEAM_ID` and `APPLE_APP_PASSWORD` (an app-specific
-password) notarizes and staples them. The signing steps have not been run yet: no certificates were available.
+password) notarizes and staples them. Android: `ANDROID_KEYSTORE_BASE64` (a keystore, base64), `ANDROID_KEYSTORE_PASSWORD`
+and `ANDROID_KEY_ALIAS` (plus `ANDROID_KEY_PASSWORD` if the key has its own) sign the APK; make the keystore once with
+`keytool -genkeypair -keystore nexus.jks -alias nexus -keyalg RSA -keysize 4096 -validity 10000` and keep it, because
+Android only installs an update over an app signed with the same key. Without those secrets each build is signed with
+a throwaway key: it installs, but the next version has to be installed after uninstalling the old one. The signing
+steps have not been run yet: no certificates were available.
 Workflow actions are pinned to commit SHAs and kept current by Dependabot, which also watches
 the Rust dependencies.
 

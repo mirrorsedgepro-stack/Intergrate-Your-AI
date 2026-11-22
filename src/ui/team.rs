@@ -227,6 +227,7 @@ impl App {
 
     // ---- chat drawer ----
     pub fn open_team(&mut self, prefill: Option<String>) {
+        self.drawer = false;
         self.team.open = true;
         self.team.unread = 0;
         if let Some(p) = prefill { self.team.input = p; }
@@ -266,7 +267,8 @@ impl App {
         if !self.team.open { return; }
         let mut send = false;
         let mut close = false;
-        egui::Panel::right("team").exact_size(330.0).frame(egui::Frame::new().fill(PANEL).inner_margin(10)).show(ui, |ui| {
+        let width = if self.compact { ui.available_width() } else { 330.0 };
+        egui::Panel::right("team").exact_size(width).frame(egui::Frame::new().fill(PANEL).inner_margin(10)).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Team").strong());
                 let hub = self.team.hub_id.as_ref().map(|id| self.machine(id).name);
