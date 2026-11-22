@@ -202,9 +202,9 @@ impl App {
             });
             ui.add_space(6.0);
         };
-        egui::Modal::new(egui::Id::unique("share")).frame(egui::Frame::new().fill(PANEL).stroke(egui::Stroke::new(1.0, LINE2)).corner_radius(12).inner_margin(16)).show(&self.ctx, |ui| {
+        egui::Modal::new(egui::Id::unique("share")).frame(super::overlays::modal_frame()).show(&self.ctx, |ui| {
             ui.set_width(680.0f32.min(screen.width() - 60.0));
-            ui.horizontal(|ui| { ui.label(RichText::new("Share your machines").size(16.0).strong()); ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { if icon_btn(ui, "x", "Close").clicked() { todo = Do::Close; } }); });
+            ui.horizontal(|ui| { ui.label(RichText::new("Share your machines").size(16.0).family(medium())); ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { if icon_btn(ui, "x", "Close").clicked() { todo = Do::Close; } }); });
             egui::ScrollArea::vertical().max_height(screen.height() - 150.0).min_scrolled_height((screen.height() - 150.0).max(120.0)).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -263,7 +263,7 @@ impl App {
                         if !ts.can_encrypt { ui.label(RichText::new("No keychain is available on this computer (on Linux: gnome-keyring or KWallet), so a credential can't be saved.").color(WARN)); }
                         ui.horizontal(|ui| {
                             ui.add(egui::TextEdit::singleline(&mut sh.token).password(true).hint_text("tskey-client-… or tskey-api-…").desired_width(380.0));
-                            if ui.add_enabled(!sh.busy, egui::Button::new(RichText::new("Save").color(BG).strong()).fill(BRAND)).clicked() { todo = Do::SaveToken; }
+                            if ui.add_enabled(!sh.busy, |ui: &mut egui::Ui| primary_btn(ui, "Save")).clicked() { todo = Do::SaveToken; }
                         });
                     }
                 });
@@ -276,13 +276,13 @@ impl App {
                         for c in &plan.changes { ui.label(format!("• {c}")); }
                         if !plan.missing.is_empty() { ui.label(RichText::new(format!("Not on the tailnet yet: {}. Join them first (step 2).", plan.missing.join(", "))).color(WARN)); }
                         ui.horizontal(|ui| {
-                            if ui.add_enabled(!plan.changes.is_empty() && !sh.busy, egui::Button::new(RichText::new("Apply changes").color(BG).strong()).fill(BRAND)).clicked() { todo = Do::Apply; }
+                            if ui.add_enabled(!plan.changes.is_empty() && !sh.busy, |ui: &mut egui::Ui| primary_btn(ui, "Apply changes")).clicked() { todo = Do::Apply; }
                             if ui.button("Cancel").clicked() { todo = Do::CancelPlan; }
                         });
                         return;
                     }
                     let mut pg = per_guest;
-                    if ui.checkbox(&mut pg, "Give each guest their own Linux account (nexus-<name>), created on the shared machines when you invite them (recommended)").changed() { todo = Do::Mode(pg); }
+                    if switch(ui, &mut pg, "Give each guest their own Linux account (nexus-<name>), created on the shared machines when you invite them (recommended)").changed() { todo = Do::Mode(pg); }
                     if per_guest {
                         ui.label(format!("Guests get SSH to these machines only, each as their own account, through Tailscale SSH: no keys to hand out, and removing a guest removes their login at once. Their files stay in /home/nexus-<name>. Your own access (as {users}) is unchanged."));
                         ui.label(RichText::new("Creating accounts needs sudo on each machine (Nexus opens a tab and asks). Guests still share the GPU, RAM and anything world-readable; agents they run sign in with their own credentials.").size(11.0).color(WARN));
@@ -300,7 +300,7 @@ impl App {
                 step(ui, 5, "Guests", false, &mut |ui| {
                     ui.horizontal(|ui| {
                         ui.add(egui::TextEdit::singleline(&mut sh.email).hint_text("friend@example.com").desired_width(300.0));
-                        if ui.add_enabled(!sh.busy, egui::Button::new(RichText::new("Invite").color(BG).strong()).fill(BRAND)).clicked() { todo = Do::Invite; }
+                        if ui.add_enabled(!sh.busy, |ui: &mut egui::Ui| primary_btn(ui, "Invite")).clicked() { todo = Do::Invite; }
                     });
                     if let Some((email, message, _)) = &sh.result {
                         ui.label(RichText::new(format!("Invite ready for {email}. Tailscale has emailed them too. Send them this message:")).strong());

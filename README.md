@@ -186,6 +186,12 @@ are different:
 
 ## Development
 
+The interface is styled after [Rust/UI](https://rust-ui.com/docs/components) (neutral surfaces, hairline borders,
+light primary buttons, switches, badges), drawn natively in egui rather than with its web components. The UI typeface
+is [Inter](https://rsms.me/inter/), bundled from `assets/fonts` under the SIL Open Font License
+(`assets/fonts/Inter-LICENSE.txt`).
+
+
 ```
 cargo test            # unit tests, plus end-to-end tests of the SSH layer against an in-process SSH server (with tmux where installed)
 scripts/package.sh    # this platform's installer(s) into dist/  (Linux: .deb · macOS: .zip · Windows: NSIS .exe, run from Git Bash)
@@ -194,6 +200,9 @@ scripts/package.sh    # this platform's installer(s) into dist/  (Linux: .deb ·
 Useful when working on the UI: `NEXUS_SCREENSHOT=shot.png cargo run` saves a picture of the window three seconds after
 start and quits (`NEXUS_OPEN=palette|settings|share|team|composer|workspaces|fleet|prompts|replay` opens that view first;
 `NEXUS_CONFIG_DIR=<folder>` uses a config other than your own). It works under `xvfb-run`.
+
+`scripts/ui-drive.py` (Linux, needs `python-xlib`) sends real mouse and keyboard events to a copy of Nexus running under
+Xvfb and takes screenshots, for checking that controls respond: `python3 scripts/ui-drive.py :97 focus click:150,335 shot:out.png`.
 
 CI runs the tests on Windows, macOS and Linux on every push and builds the installers on pull requests. To publish a
 release, bump `version` in `Cargo.toml` and push it to main (or push a matching tag, `git tag v2.0.1 && git push --tags`).

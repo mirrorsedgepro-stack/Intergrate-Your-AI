@@ -41,9 +41,13 @@ impl MenuItem {
     pub fn disabled(mut self, d: bool) -> Self { if let Self::Item { disabled, .. } = &mut self { *disabled = d; } self }
 }
 
-pub(super) fn modal_frame() -> egui::Frame { egui::Frame::new().fill(PANEL).stroke(egui::Stroke::new(1.0, LINE2)).corner_radius(12).inner_margin(16) }
-pub(super) fn section(ui: &mut egui::Ui, title: &str) { ui.add_space(10.0); ui.label(RichText::new(title.to_uppercase()).size(10.5).color(TEXT3).strong()); ui.add_space(2.0); }
-fn field(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) { ui.vertical(|ui| { ui.label(RichText::new(label).size(11.0).color(TEXT2)); add(ui); }); }
+/// A dialog: the background colour with a hairline border and a soft shadow, over the dimmed window.
+pub(super) fn modal_frame() -> egui::Frame {
+    egui::Frame::new().fill(Color32::from_rgb(0x0f, 0x0f, 0x0f)).stroke(egui::Stroke::new(1.0, LINE2)).corner_radius(12).inner_margin(20)
+        .shadow(egui::Shadow { offset: [0, 12], blur: 32, spread: 0, color: Color32::from_black_alpha(160) })
+}
+pub(super) fn section(ui: &mut egui::Ui, title: &str) { ui.add_space(14.0); ui.label(RichText::new(title).size(13.0).family(medium()).color(TEXT)); ui.add_space(3.0); }
+fn field(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) { ui.vertical(|ui| { ui.spacing_mut().item_spacing.y = 4.0; ui.label(RichText::new(label).size(11.5).color(TEXT2)); add(ui); }); }
 
 impl App {
     /// Is the keyboard in one of the text boxes beside the panes (composer, team chat, find)? Otherwise it is the
@@ -72,7 +76,7 @@ impl App {
         let esc = self.ctx.input(|i| i.key_pressed(Key::Escape));
         egui::Modal::new(egui::Id::unique(("dialog", self.dialogs.len()))).frame(modal_frame()).show(&self.ctx, |ui| {
             ui.set_width(460.0);
-            ui.label(RichText::new(&d.title).size(16.0).strong());
+            ui.label(RichText::new(&d.title).size(16.0).family(medium()));
             ui.add_space(6.0);
             if !d.desc.is_empty() { ui.label(RichText::new(&d.desc).color(TEXT2)); ui.add_space(8.0); }
             match &mut d.kind {
@@ -90,7 +94,9 @@ impl App {
                 DialogKind::Choose(options) => {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         for (i, (label, primary)) in options.iter().enumerate().rev() {
-                            let clicked = if *primary { primary_btn(ui, label).clicked() } else { ui.button(label.as_str()).clicked() };
+                            // The confirming button of something that can't be undone is the destructive variant.
+                            let destroys = ["remove", "delete", "kill", "discard", "revoke", "forget", "close "].iter().any(|w| label.to_lowercase().starts_with(w));
+                            let clicked = if *primary && destroys { danger_btn(ui, label).clicked() } else if *primary { primary_btn(ui, label).clicked() } else { ui.button(label.as_str()).clicked() };
                             if clicked { result = Some(DialogResult::Choice(Some(i))); }
                         }
                     });
@@ -419,7 +425,7 @@ impl App {
             let r = ui.add(egui::TextEdit::multiline(&mut c.text).id(id).desired_rows(4).desired_width(f32::INFINITY).hint_text(format!("Write once, send to every selected session.   {} to send", kbd("Ctrl+Enter"))));
             if std::mem::take(&mut c.focus) { r.request_focus(); }
             ui.horizontal(|ui| {
-                ui.checkbox(&mut c.submit, "Press Enter after sending");
+                switch(ui, &mut c.submit, "Press Enter after sending");
                 if icon_text_btn(ui, "book", "Prompts", false).on_hover_text("Fill this box from a saved prompt").clicked() { library = true; }
                 if icon_text_btn(ui, "save", "Save as prompt", false).on_hover_text("Keep this text in the prompt library").clicked() { save = true; }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { if primary_btn(ui, "Send").clicked() { send = true; } key_hint(ui, "Ctrl+Enter"); });
@@ -483,7 +489,7 @@ impl App {
         let screen = self.ctx.content_rect();
         egui::Modal::new(egui::Id::unique("settings")).frame(modal_frame()).show(&self.ctx, |ui| {
             ui.set_width(760.0f32.min(screen.width() - 60.0));
-            ui.horizontal(|ui| { ui.label(RichText::new("Settings").size(16.0).strong()); ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { if icon_btn(ui, "x", "Close").clicked() { todo = Do::Cancel; } }); });
+            ui.horizontal(|ui| { ui.label(RichText::new("Settings").size(16.0).family(medium())); ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { if icon_btn(ui, "x", "Close").clicked() { todo = Do::Cancel; } }); });
             egui::ScrollArea::vertical().max_height(screen.height() - 190.0).min_scrolled_height((screen.height() - 190.0).max(120.0)).show(ui, |ui| {
                 section(ui, "Machines");
                 let ssh_count = st.draft.machines.iter().filter(|m| m.is_ssh()).count();
@@ -551,19 +557,19 @@ impl App {
                         });
                     });
                 });
-                ui.checkbox(&mut d.appearance.copy_on_select, "Copy on select");
-                ui.checkbox(&mut d.appearance.notify_when_done, "Notify when a background agent finishes");
-                ui.checkbox(&mut d.collab.announce, "Post in team chat when I start an agent on a shared machine");
+                switch(ui, &mut d.appearance.copy_on_select, "Copy on select");
+                switch(ui, &mut d.appearance.notify_when_done, "Notify when a background agent finishes");
+                switch(ui, &mut d.collab.announce, "Post in team chat when I start an agent on a shared machine");
                 field(ui, "Phone alerts: an ntfy topic address (ntfy.sh or your own server). Told when an agent finishes or needs you while Nexus isn't in front. Anyone who knows the address can read the alerts, so pick a long random topic.", |ui| {
                     ui.horizontal(|ui| {
                         ui.add(egui::TextEdit::singleline(&mut d.push.url).hint_text("https://ntfy.sh/nexus-7f3k2m9x1q").font(egui::TextStyle::Monospace).desired_width(420.0));
                         if ui.add_enabled(!d.push.url.trim().is_empty(), egui::Button::new("Send a test")).clicked() { todo = Do::PushTest(d.push.url.trim().to_string()); }
                     });
                 });
-                if !d.push.url.trim().is_empty() { ui.checkbox(&mut d.push.include_text, "Include what the agent said in phone alerts (off: only which session is waiting)"); }
-                ui.checkbox(&mut d.appearance.restore_session, "Restore sessions, layout and folders when Nexus starts");
-                ui.checkbox(&mut d.appearance.record_sessions, "Record remote sessions to ~/.nexus/logs on the machine (audit trail; kept 30 days)");
-                ui.checkbox(&mut d.mcp.enabled, "Let MCP clients on this PC control Nexus (list machines, launch agents, send text, read output)");
+                if !d.push.url.trim().is_empty() { switch(ui, &mut d.push.include_text, "Include what the agent said in phone alerts (off: only which session is waiting)"); }
+                switch(ui, &mut d.appearance.restore_session, "Restore sessions, layout and folders when Nexus starts");
+                switch(ui, &mut d.appearance.record_sessions, "Record remote sessions to ~/.nexus/logs on the machine (audit trail; kept 30 days)");
+                switch(ui, &mut d.mcp.enabled, "Let MCP clients on this PC control Nexus (list machines, launch agents, send text, read output)");
                 if d.mcp.enabled {
                     ui.horizontal(|ui| {
                         ui.add_space(24.0);
@@ -572,7 +578,7 @@ impl App {
                         if ui.small_button("Copy").clicked() { ui.ctx().copy_text(cmd); }
                     });
                 }
-                ui.checkbox(&mut d.offline, "Offline / air-gapped mode: no update checks, no internet installers (tools install from ~/.nexus/offline/ on each machine)");
+                switch(ui, &mut d.offline, "Offline / air-gapped mode: no update checks, no internet installers (tools install from ~/.nexus/offline/ on each machine)");
             });
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -620,13 +626,15 @@ impl App {
         let mut run: Option<Act> = None;
         let screen = self.ctx.content_rect();
         let area = egui::Area::new(egui::Id::unique("ctxmenu")).order(egui::Order::Tooltip).pivot(egui::Align2::LEFT_TOP).fixed_pos(menu.pos).constrain_to(screen.shrink(6.0)).show(&self.ctx, |ui| {
-            egui::Frame::new().fill(PANEL2).stroke(egui::Stroke::new(1.0, LINE2)).corner_radius(9).inner_margin(5).show(ui, |ui| {
-                ui.set_min_width(230.0);
+            egui::Frame::new().fill(PANEL).stroke(egui::Stroke::new(1.0, LINE2)).corner_radius(10).inner_margin(5)
+                .shadow(egui::Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(140) }).show(ui, |ui| {
+                ui.set_width(248.0);
                 ui.spacing_mut().item_spacing.y = 1.0;
+                ui.spacing_mut().interact_size.y = 18.0;
                 for it in &menu.items {
                     match it {
                         MenuItem::Sep => { ui.add_space(3.0); ui.separator(); ui.add_space(3.0); }
-                        MenuItem::Header(h) => { ui.label(RichText::new(h.to_uppercase()).size(10.0).color(TEXT3)); }
+                        MenuItem::Header(h) => { ui.add_space(2.0); ui.horizontal(|ui| { ui.add_space(7.0); ui.label(RichText::new(h).size(11.0).family(medium()).color(TEXT3)); }); }
                         MenuItem::Item { label, kbd: k, icon, danger, disabled, run: a } => {
                             let color = if *disabled { TEXT3 } else if *danger { BAD } else { TEXT };
                             let resp = ui.add_enabled_ui(!*disabled, |ui| {
@@ -642,7 +650,7 @@ impl App {
                                         if !k.is_empty() { ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.label(RichText::new(kbd(k)).monospace().size(10.5).color(TEXT3))); }
                                     });
                                 }).response.interact(egui::Sense::click());
-                                if r.hovered() { ui.painter().rect_filled(r.rect, 6.0, Color32::from_white_alpha(10)); }
+                                if r.hovered() { ui.painter().rect_filled(r.rect, 6.0, Color32::from_white_alpha(14)); }
                                 r
                             }).inner;
                             if resp.clicked() { run = Some(a.clone()); }
@@ -674,7 +682,7 @@ impl App {
         egui::Area::new(egui::Id::unique("toasts")).order(egui::Order::Tooltip).pivot(egui::Align2::RIGHT_BOTTOM).fixed_pos(screen.right_bottom() - Vec2::new(16.0, 40.0)).show(&self.ctx, |ui| {
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Max), |ui| {
                 for (i, t) in self.toasts.iter().enumerate().rev() {
-                    egui::Frame::new().fill(PANEL3).stroke(egui::Stroke::new(1.0, tint(t.color, 0.5))).corner_radius(9).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+                    egui::Frame::new().fill(PANEL).stroke(egui::Stroke::new(1.0, LINE2)).corner_radius(10).inner_margin(egui::Margin::symmetric(14, 10)).shadow(egui::Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(140) }).show(ui, |ui| {
                         ui.set_max_width(440.0);
                         ui.horizontal_wrapped(|ui| {
                             ui.label(RichText::new("●").size(9.0).color(t.color));

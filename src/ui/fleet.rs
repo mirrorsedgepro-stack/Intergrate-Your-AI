@@ -134,7 +134,7 @@ impl App {
             // A modal keeps the size of its first frame unless told otherwise; this one is a full-height dashboard.
             ui.set_min_height((screen.height() - 110.0).max(200.0));
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Fleet").size(16.0).strong());
+                ui.label(RichText::new("Fleet").size(16.0).family(medium()));
                 let working = all.iter().filter(|id| self.look(&self.sessions[id]) == Look::Working).count();
                 ui.label(dim(format!("{} session{} · {working} working · {} waiting for you", all.len(), if all.len() == 1 { "" } else { "s" }, waiting.len())));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { if icon_btn(ui, "x", "Close (Esc)").clicked() { close = true; } });
@@ -320,7 +320,7 @@ impl App {
             let height = (screen.height() - 150.0).max(200.0);
             ui.set_width(width);
             ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("Recorded sessions on {name}")).size(16.0).strong());
+                ui.label(RichText::new(format!("Recorded sessions on {name}")).size(16.0).family(medium()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { if icon_btn(ui, "x", "Close (Esc)").clicked() { close = true; } });
             });
             ui.horizontal_top(|ui| {
