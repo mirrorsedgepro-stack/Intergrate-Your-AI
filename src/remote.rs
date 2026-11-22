@@ -114,6 +114,22 @@ pub fn sh_path(p: &str) -> String {
 /// ~/.local/bin PATH entries load); when it exits you drop into your normal shell instead of losing the pane.
 /// record: also pipe everything the pane prints into ~/.nexus/logs/<tmuxName>-<date>.log on the machine (an audit
 /// trail of what each agent did; pipe-pane -o makes it idempotent across reattaches).
+/// Wrap a POSIX shell command so that the account's login shell, whatever it is, hands it to `sh` untouched.
+/// sshd runs every command through the login shell, and fish, csh, nushell and others don't parse `if … then … fi`,
+/// `for … do` or `$(…)` the POSIX way (fish: "Expected end of the statement"). So the login shell is given only
+/// `sh -c 'eval "$(printf "…")"'` where the script is spelled with plain characters and octal escapes: nothing in it
+/// (quotes, `$`, backslashes, newlines, `!`) means anything to any of those shells. `sh` then evaluates the script
+/// in place, so `exec`, the terminal and the exit status behave as if it had been run directly.
+pub fn posix(cmd: &str) -> String {
+    let mut out = String::with_capacity(cmd.len() * 2 + 32);
+    out.push_str("sh -c 'eval \"$(printf \"");
+    for b in cmd.bytes() {
+        if b.is_ascii_alphanumeric() || b" _./:=,@+-".contains(&b) { out.push(b as char); } else { out.push_str(&format!("\\{b:03o}")); }
+    }
+    out.push_str("\")\"'");
+    out
+}
+
 pub fn session_command(tmux_name: Option<&str>, cmd: &str, tmux: &str, cwd: &str, read_only: bool, record: bool) -> String {
     let name = tmux_name.filter(|n| !n.is_empty());
     // Watch someone else's session without being able to type into it.
@@ -556,7 +572,7 @@ impl Machine {
         let h = self.handle()?;
         let run = async {
             let ch = h.channel_open_session().await.map_err(|e| e.to_string())?;
-            ch.exec(true, cmd).await.map_err(|e| e.to_string())?;
+            ch.exec(true, posix(cmd)).await.map_err(|e| e.to_string())?;
             let (mut rd, wr) = ch.split();
             let feed = tokio::spawn(async move {
                 match stdin {
@@ -642,14 +658,14 @@ impl Machine {
         let full = session_command(tmux_name, cmd, TMUX, cwd, read_only, record);
         let ch = self.handle()?.channel_open_session().await.map_err(|e| e.to_string())?;
         ch.request_pty(false, "xterm-256color", u32::from(cols), u32::from(rows), 0, 0, &[]).await.map_err(|e| e.to_string())?;
-        ch.exec(true, full).await.map_err(|e| e.to_string())?;
+        ch.exec(true, posix(&full)).await.map_err(|e| e.to_string())?;
         Ok(ch)
     }
 
     /// A long-running command with no pty whose output is read as it arrives (the team chat's `tail -F`).
     pub async fn exec_stream(&self, cmd: &str) -> Result<russh::Channel<client::Msg>, String> {
         let ch = self.handle()?.channel_open_session().await.map_err(|e| e.to_string())?;
-        ch.exec(true, cmd).await.map_err(|e| e.to_string())?;
+        ch.exec(true, posix(cmd)).await.map_err(|e| e.to_string())?;
         Ok(ch)
     }
 
@@ -742,6 +758,27 @@ mod tests {
         let a = parse_agent(r#"{"ts": 12.0, "event": "Stop", "summary": "ok"}"#).unwrap();
         assert_eq!((a.ts, a.event.as_str(), a.summary.as_str(), a.message.as_str()), (12, "Stop", "ok", ""));
         assert!(parse_agent("[]").is_none() && parse_agent("").is_none());
+    }
+
+    #[test]
+    fn commands_reach_sh_untouched_whatever_the_login_shell() {
+        // What the login shell is asked to parse holds nothing any shell treats specially inside single quotes.
+        let script = "if command -v tmux >/dev/null 2>&1; then printf '%s\\n' \"it's $HOME\" 'a\\b' \"100%\"; else echo no; fi\nfor f in a b; do echo \"$f!\"; done; echo ünï `echo tick` $(echo sub)";
+        let wrapped = posix(script);
+        let inner = wrapped.strip_prefix("sh -c 'eval \"$(printf \"").unwrap().strip_suffix("\")\"'").unwrap();
+        assert!(inner.chars().all(|c| c.is_ascii_alphanumeric() || " _./:=,@+-\\".contains(c)), "{inner}");
+        assert_eq!(posix("echo hi"), "sh -c 'eval \"$(printf \"echo hi\")\"'");
+        // And sh runs exactly the script that went in (run here through bash and through sh, as a login shell would).
+        #[cfg(unix)]
+        for shell in ["sh", "bash"] {
+            let run = |c: &str| { let mut cmd = crate::platform::command(shell); cmd.arg("-c").arg(c).env("HOME", "/h"); crate::platform::run(cmd, None, std::time::Duration::from_secs(10)) };
+            let (direct, via) = (run(script), run(&wrapped));
+            if direct.code != 0 { continue; } // that shell isn't installed
+            assert_eq!((via.code, String::from_utf8_lossy(&via.stdout).into_owned()), (0, String::from_utf8_lossy(&direct.stdout).into_owned()), "{shell}");
+            assert!(String::from_utf8_lossy(&via.stdout).contains("it's /h\na\\b\n100%\na!\nb!\nünï tick sub"), "{}", String::from_utf8_lossy(&via.stdout));
+            // exec, exit status and stdin pass through.
+            assert_eq!(run(&posix("exec sh -c 'exit 7'")).code, 7);
+        }
     }
 
     #[test]

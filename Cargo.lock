@@ -2606,7 +2606,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-terminal"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "alacritty_terminal",
  "base64 0.23.1",
