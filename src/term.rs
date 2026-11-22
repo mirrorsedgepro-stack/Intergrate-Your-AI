@@ -11,8 +11,8 @@ use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, R
 use eframe::egui::{self, Color32, FontId, Key, Modifiers, Pos2, Rect, Stroke, Vec2};
 use std::sync::{Arc, Mutex};
 
-pub const BG: Color32 = Color32::from_rgb(0x0b, 0x0f, 0x18);
-pub const FG: Color32 = Color32::from_rgb(0xc8, 0xd3, 0xf5);
+pub const BG: Color32 = Color32::from_rgb(0x0a, 0x0a, 0x0a);
+pub const FG: Color32 = Color32::from_rgb(0xe5, 0xe5, 0xe5);
 /// The font family for emoji code points: the system's colour emoji font first (see ui::load_fonts).
 pub const EMOJI_FAMILY: &str = "term-emoji";
 /// Is this cell a picture rather than text? The emoji planes; the older symbols that are emoji by default (the
@@ -21,7 +21,7 @@ pub fn is_emoji(c: char, wide: bool, selector: bool) -> bool {
     let u = c as u32;
     selector || (0x1f000..=0x1fffd).contains(&u) || (wide && (0x2300..=0x2bff).contains(&u))
 }
-const SELECTION: Color32 = Color32::from_rgb(0x2b, 0x3b, 0x62);
+const SELECTION: Color32 = Color32::from_rgb(0x2f, 0x4a, 0x78);
 /// black, red, green, yellow, blue, magenta, cyan, white, then the bright eight.
 const ANSI: [u32; 16] = [0x1d2233, 0xf7768e, 0x9ece6a, 0xe0af68, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0xa9b1d6, 0x4e5675, 0xff8fa3, 0xb9f27c, 0xffc777, 0x8db0ff, 0xc9aaff, 0xa4e4ff, 0xe6ebff];
 

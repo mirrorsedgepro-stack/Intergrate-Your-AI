@@ -21,21 +21,28 @@ use std::sync::Arc;
 pub use sessions::{Activity, Extra, SessStatus, Session};
 
 // ---------------------------------------------------------------- look
-pub const BG: Color32 = Color32::from_rgb(0x09, 0x0c, 0x13);
-pub const BG2: Color32 = Color32::from_rgb(0x0d, 0x11, 0x1a);
-pub const PANEL: Color32 = Color32::from_rgb(0x11, 0x16, 0x22);
-pub const PANEL2: Color32 = Color32::from_rgb(0x16, 0x1c, 0x2b);
-pub const PANEL3: Color32 = Color32::from_rgb(0x1c, 0x23, 0x35);
-pub const LINE: Color32 = Color32::from_rgb(0x1b, 0x21, 0x31);
-pub const LINE2: Color32 = Color32::from_rgb(0x29, 0x31, 0x47);
-pub const TEXT: Color32 = Color32::from_rgb(0xd5, 0xdb, 0xeb);
-pub const TEXT2: Color32 = Color32::from_rgb(0x9a, 0xa3, 0xba);
-pub const TEXT3: Color32 = Color32::from_rgb(0x64, 0x6d, 0x85);
-pub const BRAND: Color32 = Color32::from_rgb(0x7a, 0xa2, 0xf7);
-pub const BRAND2: Color32 = Color32::from_rgb(0xbb, 0x9a, 0xf7);
-pub const OK: Color32 = Color32::from_rgb(0x73, 0xda, 0xca);
-pub const WARN: Color32 = Color32::from_rgb(0xe0, 0xaf, 0x68);
-pub const BAD: Color32 = Color32::from_rgb(0xf7, 0x76, 0x8e);
+// The look follows Rust/UI (rust-ui.com), the shadcn-style component set: neutral surfaces, hairline borders,
+// 8 px corners, and one light "primary" for the main action. Colours that identify a machine or an agent stay theirs.
+pub const BG: Color32 = Color32::from_rgb(0x0a, 0x0a, 0x0a); // background
+pub const BG2: Color32 = Color32::from_rgb(0x0d, 0x0d, 0x0d); // sidebar
+pub const PANEL: Color32 = Color32::from_rgb(0x14, 0x14, 0x14); // card, popover
+pub const PANEL2: Color32 = Color32::from_rgb(0x1c, 0x1c, 0x1c); // secondary / muted
+pub const PANEL3: Color32 = Color32::from_rgb(0x26, 0x26, 0x26); // accent (hover, selected)
+pub const LINE: Color32 = Color32::from_rgb(0x20, 0x20, 0x20); // border
+pub const LINE2: Color32 = Color32::from_rgb(0x2e, 0x2e, 0x2e); // input border
+pub const TEXT: Color32 = Color32::from_rgb(0xfa, 0xfa, 0xfa); // foreground
+pub const TEXT2: Color32 = Color32::from_rgb(0xa1, 0xa1, 0xa1); // muted foreground
+pub const TEXT3: Color32 = Color32::from_rgb(0x73, 0x73, 0x73);
+pub const PRIMARY: Color32 = Color32::from_rgb(0xe5, 0xe5, 0xe5);
+pub const PRIMARY_FG: Color32 = Color32::from_rgb(0x17, 0x17, 0x17);
+pub const RING: Color32 = Color32::from_rgb(0x8a, 0x8a, 0x8a); // focus ring
+pub const BRAND: Color32 = Color32::from_rgb(0x6e, 0xa8, 0xfe);
+pub const BRAND2: Color32 = Color32::from_rgb(0xa7, 0x8b, 0xfa);
+pub const OK: Color32 = Color32::from_rgb(0x34, 0xd3, 0x99);
+pub const WARN: Color32 = Color32::from_rgb(0xfb, 0xbf, 0x24);
+pub const BAD: Color32 = Color32::from_rgb(0xff, 0x64, 0x67); // destructive
+/// The UI typeface (Inter, bundled) in its medium weight: titles and button labels.
+pub fn medium() -> FontFamily { FontFamily::Name("ui-medium".into()) }
 
 /// "#RRGGBB" -> colour (grey when it isn't one).
 pub fn hex(s: &str) -> Color32 {
@@ -56,28 +63,40 @@ fn style(ctx: &egui::Context) {
     let mut v = egui::Visuals::dark();
     v.panel_fill = BG2;
     v.window_fill = PANEL;
-    v.extreme_bg_color = BG;
+    v.extreme_bg_color = Color32::from_rgb(0x12, 0x12, 0x12); // text fields
     v.faint_bg_color = PANEL2;
     v.override_text_color = Some(TEXT);
     v.hyperlink_color = BRAND;
-    v.selection.bg_fill = tint(BRAND, 0.45);
-    v.selection.stroke = egui::Stroke::new(1.0, TEXT);
+    v.selection.bg_fill = Color32::from_rgb(0x2f, 0x4a, 0x78);
+    v.selection.stroke = egui::Stroke::new(1.5, RING); // the ring round a focused field
     v.window_stroke = egui::Stroke::new(1.0, LINE2);
+    v.window_corner_radius = 12.into();
+    v.menu_corner_radius = 10.into();
+    let shadow = egui::Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(140) };
+    v.window_shadow = shadow;
+    v.popup_shadow = shadow;
+    v.striped = false;
+    v.slider_trailing_fill = true;
     v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, LINE);
     v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, TEXT2);
-    for (w, fill) in [(&mut v.widgets.inactive, PANEL2), (&mut v.widgets.hovered, PANEL3), (&mut v.widgets.active, PANEL3), (&mut v.widgets.open, PANEL3)] {
+    v.widgets.noninteractive.corner_radius = 8.into();
+    // Plain buttons are the "outline" variant: a quiet fill with an input-coloured border that lifts on hover.
+    for (w, fill, line) in [(&mut v.widgets.inactive, PANEL2, LINE2), (&mut v.widgets.hovered, PANEL3, Color32::from_rgb(0x3a, 0x3a, 0x3a)), (&mut v.widgets.active, Color32::from_rgb(0x30, 0x30, 0x30), Color32::from_rgb(0x44, 0x44, 0x44)), (&mut v.widgets.open, PANEL3, Color32::from_rgb(0x3a, 0x3a, 0x3a))] {
         w.bg_fill = fill;
         w.weak_bg_fill = fill;
-        w.bg_stroke = egui::Stroke::new(1.0, LINE2);
+        w.bg_stroke = egui::Stroke::new(1.0, line);
         w.fg_stroke = egui::Stroke::new(1.0, TEXT);
-        w.corner_radius = 6.into();
+        w.corner_radius = 8.into();
+        w.expansion = 0.0;
     }
     ctx.set_visuals(v);
     ctx.all_styles_mut(|s| {
-        s.spacing.item_spacing = Vec2::new(6.0, 5.0);
-        s.spacing.button_padding = Vec2::new(8.0, 4.0);
+        s.spacing.item_spacing = Vec2::new(8.0, 6.0);
+        s.spacing.button_padding = Vec2::new(10.0, 5.0);
+        s.spacing.interact_size.y = 26.0;
+        s.spacing.menu_margin = egui::Margin::same(6);
         s.interaction.selectable_labels = false;
-        for (ts, size) in [(egui::TextStyle::Body, 13.0), (egui::TextStyle::Button, 13.0), (egui::TextStyle::Small, 11.0), (egui::TextStyle::Heading, 18.0), (egui::TextStyle::Monospace, 12.5)] {
+        for (ts, size) in [(egui::TextStyle::Body, 13.0), (egui::TextStyle::Button, 13.0), (egui::TextStyle::Small, 11.5), (egui::TextStyle::Heading, 18.0), (egui::TextStyle::Monospace, 12.5)] {
             if let Some(f) = s.text_styles.get_mut(&ts) { f.size = size; }
         }
     });
@@ -123,8 +142,13 @@ fn load_fonts(ctx: &egui::Context, families: &str) -> bool {
     defs.families.insert(FontFamily::Name(crate::term::EMOJI_FAMILY.into()), chain(emoji.iter().chain(&regular).cloned().collect()));
     if has_bold { bold.extend(regular.iter().cloned()); defs.families.insert(FontFamily::Name("term-bold".into()), chain(bold)); }
     defs.families.insert(FontFamily::Name("term".into()), chain(regular));
-    // The UI font also gets the fallbacks (team chat and folder names can hold anything).
-    if let Some(p) = defs.families.get_mut(&FontFamily::Proportional) { p.extend(fallbacks.iter().cloned()); }
+    // The UI typeface is Inter (bundled, so every platform looks the same), then egui's own fonts and the fallbacks
+    // (team chat and folder names can hold anything).
+    defs.font_data.insert("ui-regular".into(), Arc::new(egui::FontData::from_static(include_bytes!("../../assets/fonts/Inter-Regular.ttf"))));
+    defs.font_data.insert("ui-medium".into(), Arc::new(egui::FontData::from_static(include_bytes!("../../assets/fonts/Inter-Medium.ttf"))));
+    if let Some(p) = defs.families.get_mut(&FontFamily::Proportional) { p.insert(0, "ui-regular".into()); p.extend(fallbacks.iter().cloned()); }
+    let ui_chain = defs.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+    defs.families.insert(medium(), std::iter::once("ui-medium".to_string()).chain(ui_chain).collect());
     ctx.set_fonts(defs);
     has_bold
 }
@@ -541,16 +565,20 @@ pub fn dot(ui: &mut egui::Ui, status: Status) -> egui::Response {
     ui.painter().circle_filled(r.center(), 3.5, c);
     resp.on_hover_text(status.as_str())
 }
+/// A badge: a tinted, hairline-bordered pill.
 pub fn chip(ui: &mut egui::Ui, text: &str, color: Color32) -> egui::Response {
-    let galley = ui.painter().layout_no_wrap(text.to_string(), FontId::proportional(11.0), color);
-    let (rect, resp) = ui.allocate_exact_size(galley.size() + Vec2::new(14.0, 4.0), egui::Sense::hover());
-    ui.painter().rect_filled(rect, rect.height() / 2.0, tint(color, 0.16));
-    ui.painter().galley(rect.min + Vec2::new(7.0, 2.0), galley, color);
+    let galley = ui.painter().layout_no_wrap(text.to_string(), FontId::new(11.0, medium()), color);
+    let (rect, resp) = ui.allocate_exact_size(galley.size() + Vec2::new(14.0, 5.0), egui::Sense::hover());
+    ui.painter().rect(rect, rect.height() / 2.0, tint(color, 0.13), egui::Stroke::new(1.0, tint(color, 0.3)), egui::StrokeKind::Inside);
+    ui.painter().galley(rect.min + Vec2::new(7.0, 2.5), galley, color);
     resp
 }
+/// A keyboard key.
 pub fn key_hint(ui: &mut egui::Ui, text: &str) {
-    egui::Frame::new().fill(PANEL2).stroke(egui::Stroke::new(1.0, LINE2)).corner_radius(4).inner_margin(egui::Margin::symmetric(5, 0))
-        .show(ui, |ui| ui.label(RichText::new(kbd(text)).monospace().size(10.5).color(TEXT2)));
+    let galley = ui.painter().layout_no_wrap(kbd(text), FontId::new(10.5, medium()), TEXT2);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new((galley.size().x + 10.0).max(20.0), 20.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 5.0, PANEL3);
+    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, TEXT2);
 }
 /// Line icons (the same drawings the Electron renderer used), as white SVGs tinted when drawn.
 const ICONS: &[(&str, &str)] = &[
@@ -601,7 +629,7 @@ pub fn icon(ui: &mut egui::Ui, name: &str, size: f32, color: Color32) -> egui::R
 pub fn icon_btn(ui: &mut egui::Ui, name: &str, tip: &str) -> egui::Response { icon_btn_c(ui, name, tip, TEXT2, 15.0) }
 pub fn icon_btn_c(ui: &mut egui::Ui, name: &str, tip: &str, color: Color32, size: f32) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size + 9.0), egui::Sense::click());
-    if resp.hovered() { ui.painter().rect_filled(rect, 6.0, PANEL3); }
+    if resp.hovered() { ui.painter().rect_filled(rect, 7.0, PANEL3); }
     egui::Image::new(icon_src(name)).tint(if resp.hovered() { TEXT } else { color }).paint_at(ui, egui::Rect::from_center_size(rect.center(), Vec2::splat(size)));
     if tip.is_empty() { resp } else { resp.on_hover_text(kbd(tip)) }
 }
@@ -610,7 +638,7 @@ pub fn icon_text_btn(ui: &mut egui::Ui, name: &str, text: &str, framed: bool) ->
     let galley = ui.painter().layout_no_wrap(text.to_string(), FontId::proportional(13.0), TEXT);
     let pad = if framed { Vec2::new(9.0, 5.0) } else { Vec2::new(4.0, 4.0) };
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(14.0 + 6.0 + galley.size().x, galley.size().y.max(14.0)) + pad * 2.0, egui::Sense::click());
-    if framed || resp.hovered() { ui.painter().rect(rect, 6.0, if resp.hovered() { PANEL3 } else { PANEL2 }, egui::Stroke::new(1.0, if framed { LINE2 } else { Color32::TRANSPARENT }), egui::StrokeKind::Inside); }
+    if framed || resp.hovered() { ui.painter().rect(rect, 8.0, if resp.hovered() { PANEL3 } else { PANEL2 }, egui::Stroke::new(1.0, if framed { LINE2 } else { Color32::TRANSPARENT }), egui::StrokeKind::Inside); }
     egui::Image::new(icon_src(name)).tint(TEXT2).paint_at(ui, egui::Rect::from_min_size(egui::pos2(rect.left() + pad.x, rect.center().y - 7.0), Vec2::splat(14.0)));
     ui.painter().galley(egui::pos2(rect.left() + pad.x + 20.0, rect.center().y - galley.size().y / 2.0), galley, TEXT);
     resp
@@ -635,8 +663,40 @@ pub fn pill(ui: &mut egui::Ui, logo_key: &str, text: &str, sub: &str, color: Col
     if let Some(g) = sub_g { ui.painter().galley(egui::pos2(x, y + gh), g, TEXT3); }
     resp
 }
-pub fn primary_btn(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    ui.add(egui::Button::new(RichText::new(text).color(BG).strong()).fill(BRAND))
+/// Button variants, as in Rust/UI: the light primary for the main action, destructive for what can't be undone.
+/// (Plain `ui.button` is the outline variant; icon buttons are the ghost variant.)
+#[derive(Clone, Copy, PartialEq)]
+pub enum Variant { Primary, Destructive }
+pub fn btn(ui: &mut egui::Ui, text: &str, variant: Variant) -> egui::Response {
+    let (fill, fg) = match variant { Variant::Primary => (PRIMARY, PRIMARY_FG), Variant::Destructive => (Color32::from_rgb(0x99, 0x2f, 0x33), Color32::WHITE) };
+    let galley = ui.painter().layout_no_wrap(text.to_string(), FontId::new(13.0, medium()), fg);
+    let pad = ui.spacing().button_padding + Vec2::new(2.0, 0.0);
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(galley.size().x + pad.x * 2.0, (galley.size().y + pad.y * 2.0).max(ui.spacing().interact_size.y)), egui::Sense::click());
+    // hover: 90 % of the fill; pressed: a touch smaller, like the web component's active scale.
+    let mix = |c: Color32, a: f32| Color32::from_rgb((f32::from(c.r()) * a) as u8, (f32::from(c.g()) * a) as u8, (f32::from(c.b()) * a) as u8);
+    let (fill, fg) = if !ui.is_enabled() { (mix(fill, 0.45), mix(fg, 0.6)) } else if resp.is_pointer_button_down_on() { (mix(fill, 0.82), fg) } else if resp.hovered() { (mix(fill, 0.9), fg) } else { (fill, fg) };
+    let r = if resp.is_pointer_button_down_on() { rect.shrink(0.5) } else { rect };
+    ui.painter().rect_filled(r, 8.0, fill);
+    if resp.has_focus() { ui.painter().rect_stroke(rect.expand(2.0), 10.0, egui::Stroke::new(1.5, RING), egui::StrokeKind::Outside); }
+    ui.painter().galley_with_override_text_color(rect.center() - galley.size() / 2.0, galley, fg);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+pub fn primary_btn(ui: &mut egui::Ui, text: &str) -> egui::Response { btn(ui, text, Variant::Primary) }
+pub fn danger_btn(ui: &mut egui::Ui, text: &str) -> egui::Response { btn(ui, text, Variant::Destructive) }
+/// A switch with its label; clicking either toggles it.
+pub fn switch(ui: &mut egui::Ui, on: &mut bool, text: &str) -> egui::Response {
+    ui.horizontal_top(|ui| {
+        let (rect, mut resp) = ui.allocate_exact_size(Vec2::new(30.0, 18.0), egui::Sense::click());
+        let label = ui.add(egui::Label::new(RichText::new(text).color(if ui.is_enabled() { TEXT } else { TEXT3 })).wrap().sense(egui::Sense::click()));
+        if resp.clicked() || label.clicked() { *on = !*on; resp.mark_changed(); }
+        let t = ui.ctx().animate_bool_with_time(resp.id, *on, 0.12);
+        let lerp = |a: Color32, b: Color32| Color32::from_rgb((f32::from(a.r()) + (f32::from(b.r()) - f32::from(a.r())) * t) as u8, (f32::from(a.g()) + (f32::from(b.g()) - f32::from(a.g())) * t) as u8, (f32::from(a.b()) + (f32::from(b.b()) - f32::from(a.b())) * t) as u8);
+        let track = lerp(Color32::from_rgb(0x3a, 0x3a, 0x3a), PRIMARY);
+        ui.painter().rect_filled(rect, 9.0, if resp.hovered() || label.hovered() { lerp(Color32::from_rgb(0x46, 0x46, 0x46), Color32::WHITE) } else { track });
+        ui.painter().circle_filled(egui::pos2(rect.left() + 9.0 + 12.0 * t, rect.center().y), 7.0, lerp(TEXT, PRIMARY_FG));
+        if resp.has_focus() { ui.painter().rect_stroke(rect.expand(2.0), 11.0, egui::Stroke::new(1.5, RING), egui::StrokeKind::Outside); }
+        resp
+    }).inner
 }
 pub fn dim(text: impl Into<String>) -> RichText { RichText::new(text).color(TEXT3) }
 

@@ -132,7 +132,7 @@ impl App {
         let color = hex(&m.color);
         let mid = m.id.clone();
         // The card senses (right-)clicks underneath everything in it: launchers, session rows and the menu button come first.
-        let card = ui.scope_builder(egui::UiBuilder::new().id_salt(("machine-card", &m.id)).sense(egui::Sense::click()), |ui| { egui::Frame::new().fill(PANEL).stroke(egui::Stroke::new(1.0, LINE)).corner_radius(11).inner_margin(9).show(ui, |ui| {
+        let card = ui.scope_builder(egui::UiBuilder::new().id_salt(("machine-card", &m.id)).sense(egui::Sense::click()), |ui| { egui::Frame::new().fill(PANEL).stroke(egui::Stroke::new(1.0, LINE)).corner_radius(12).inner_margin(10).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 logo_img(ui, self.machine_icon(m), 22.0);
@@ -328,7 +328,7 @@ impl App {
             ui.vertical_centered(|ui| {
                 ui.set_max_width(width);
                 ui.add_space(40.0);
-                ui.label(RichText::new("One terminal. Every agent.").size(28.0).strong());
+                ui.label(RichText::new("One terminal. Every agent.").size(28.0).family(medium()));
                 ui.label(RichText::new("Claude, Antigravity, OpenClaw and shells on every machine on your LAN, side by side.").color(TEXT2));
                 ui.add_space(18.0);
                 for m in self.machines_sorted() {
