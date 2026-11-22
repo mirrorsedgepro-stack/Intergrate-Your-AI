@@ -4,7 +4,7 @@ name: Release
 # installers for Windows, macOS and Linux. (A version bump on main releases v<version> unless that tag or release
 # already exists; the tag is created when the release is published.)
 # They are uploaded to a draft release, scanned (VirusTotal + Microsoft Defender block; ClamAV is reported), and the
-# release is published only if the blocking scans pass (see verify-and-publish.yml for what VirusTotal may report).
+# release is published only if the blocking scans are clean.
 # Installed copies of Nexus then pick it up automatically.
 on:
   push:
