@@ -59,7 +59,9 @@ impl App {
                             for (i, id) in self.ordered().into_iter().enumerate() {
                                 let s = &self.sessions[&id];
                                 let active = focused == Some(id);
-                                let resp = egui::Frame::new().fill(if active { PANEL2 } else { Color32::TRANSPARENT }).corner_radius(8).inner_margin(egui::Margin::symmetric(8, 5)).show(ui, |ui| {
+                                // The tab senses clicks underneath its contents (UiBuilder::sense), so its close button
+                                // still gets its own. Sensing on the frame's response afterwards would cover the button.
+                                let resp = ui.scope_builder(egui::UiBuilder::new().id_salt(("tab", id)).sense(egui::Sense::click()), |ui| { egui::Frame::new().fill(if active { PANEL2 } else { Color32::TRANSPARENT }).corner_radius(8).inner_margin(egui::Margin::symmetric(8, 5)).show(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         match Self::act_color(s) {
                                             Some(c) => { let (r, _) = ui.allocate_exact_size(Vec2::splat(14.0), egui::Sense::hover()); ui.painter().circle_filled(r.center(), 4.0, c); }
@@ -70,7 +72,7 @@ impl App {
                                         if i < 9 { ui.label(RichText::new(format!("^{}", i + 1)).monospace().size(9.5).color(TEXT3)); }
                                         if icon_btn_c(ui, "x", "", TEXT3, 10.0).clicked() { todo.push(act(move |a| a.close_session(id, false))); }
                                     });
-                                }).response.interact(egui::Sense::click());
+                                }); }).response;
                                 if active { ui.painter().hline(resp.rect.x_range(), resp.rect.bottom() - 1.0, egui::Stroke::new(2.0, s.color)); }
                                 let resp = resp.on_hover_text(if s.title.is_empty() { s.name.clone() } else { s.title.clone() });
                                 if resp.clicked() { todo.push(act(move |a| a.show(id))); }
@@ -129,7 +131,8 @@ impl App {
         let status = self.status_of(m);
         let color = hex(&m.color);
         let mid = m.id.clone();
-        let card = egui::Frame::new().fill(PANEL).stroke(egui::Stroke::new(1.0, LINE)).corner_radius(11).inner_margin(9).show(ui, |ui| {
+        // The card senses (right-)clicks underneath everything in it: launchers, session rows and the menu button come first.
+        let card = ui.scope_builder(egui::UiBuilder::new().id_salt(("machine-card", &m.id)).sense(egui::Sense::click()), |ui| { egui::Frame::new().fill(PANEL).stroke(egui::Stroke::new(1.0, LINE)).corner_radius(11).inner_margin(9).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 logo_img(ui, self.machine_icon(m), 22.0);
@@ -185,10 +188,12 @@ impl App {
             let open: Vec<&Session> = self.ordered().into_iter().filter_map(|id| self.sessions.get(&id)).filter(|s| s.machine_id == m.id).collect();
             let open_names: HashSet<&String> = open.iter().filter_map(|s| s.tmux_name.as_ref()).collect();
             let row = |ui: &mut egui::Ui, active: bool, add: &mut dyn FnMut(&mut egui::Ui)| -> egui::Response {
-                egui::Frame::new().fill(if active { PANEL3 } else { Color32::TRANSPARENT }).corner_radius(6).inner_margin(egui::Margin::symmetric(5, 3)).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| add(ui));
-                }).response.interact(egui::Sense::click())
+                ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
+                    egui::Frame::new().fill(if active { PANEL3 } else { Color32::TRANSPARENT }).corner_radius(6).inner_margin(egui::Margin::symmetric(5, 3)).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| add(ui));
+                    });
+                }).response
             };
             for s in &open {
                 let id = s.id;
@@ -237,10 +242,10 @@ impl App {
                     }));
                 } else if resp.clicked() { todo.push(act(move |x| x.reattach(&a, &name, true, false, false))); }
             }
-        }).response;
+        }); }).response;
         // A coloured edge in the machine's accent.
         ui.painter().rect_filled(egui::Rect::from_min_max(card.rect.left_top() + Vec2::new(0.0, 10.0), card.rect.left_bottom() + Vec2::new(2.0, -10.0)), 1.0, color);
-        if card.interact(egui::Sense::click()).secondary_clicked() { if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) { todo.push(act(move |a| a.machine_menu(pos, &mid))); } }
+        if card.secondary_clicked() { if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) { todo.push(act(move |a| a.machine_menu(pos, &mid))); } }
     }
 
     /// GPU / RAM / CPU / disk / network, refreshed every 5 s.
