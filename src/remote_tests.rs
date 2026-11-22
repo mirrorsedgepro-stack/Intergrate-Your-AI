@@ -35,6 +35,7 @@ impl server::Handler for Srv {
     async fn auth_publickey(&mut self, _user: &str, key: server::VerifiedPublicKey<'_>) -> Result<Auth, Self::Error> {
         Ok(if key.public_key.key_data() == self.allowed.key_data() { Auth::Accept } else { Auth::reject() })
     }
+    async fn auth_password(&mut self, _user: &str, password: &str) -> Result<Auth, Self::Error> { Ok(if password == PASSWORD { Auth::Accept } else { Auth::reject() }) }
     async fn channel_open_session(&mut self, _channel: Channel<Msg>, reply: server::ChannelOpenHandle, _s: &mut Session) -> Result<(), Self::Error> { reply.accept().await; Ok(()) }
     async fn pty_request(&mut self, channel: ChannelId, _term: &str, cols: u32, rows: u32, _pw: u32, _ph: u32, _modes: &[(russh::Pty, u32)], s: &mut Session) -> Result<(), Self::Error> {
         self.pty.lock().unwrap().insert(channel, (cols as u16, rows as u16));
@@ -110,6 +111,9 @@ impl server::Handler for Srv {
         Ok(())
     }
 }
+
+/// The account password the test server accepts (only "Set up SSH key" ever offers one).
+const PASSWORD: &str = "nexus-test-password";
 
 struct TestServer { port: u16, home: PathBuf, key_file: PathBuf, stop: russh::server::RunningServerHandle }
 
@@ -461,5 +465,37 @@ fn serve_for_hand_checks() {
         let info = serde_json::json!({ "port": srv.port, "key": srv.key_file, "home": srv.home, "pinKey": pin_key, "pin": r.pins.known(&pin_key) });
         std::fs::write(std::env::var("NEXUS_SERVE_INFO").unwrap_or("/tmp/nexus-serve.json".into()), info.to_string()).unwrap();
         tokio::time::sleep(Duration::from_secs(std::env::var("NEXUS_SERVE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(60))).await;
+    });
+}
+
+#[test]
+fn set_up_key_signs_in_with_the_password_once_and_installs_the_device_key() {
+    use std::os::unix::fs::PermissionsExt;
+    runtime().block_on(async {
+        let srv = start_server("setup-key", None).await;
+        // This device's key is made on first use, kept private, and reused afterwards.
+        let dir = srv.home.join("device").join(".ssh");
+        let public = device_key_in(&dir).unwrap();
+        assert!(public.starts_with("ssh-ed25519 "), "{public}");
+        assert_eq!(device_key_in(&dir).unwrap(), public);
+        assert_eq!(std::fs::metadata(dir.join("id_ed25519")).unwrap().permissions().mode() & 0o777, 0o600);
+
+        // The server doesn't know that key yet: signing in fails, and a wrong password doesn't help.
+        let r = rig(srv.port, dir.join("id_ed25519"), true);
+        assert!(r.machine.connect().await.is_err());
+        assert!(r.machine.install_key_as(public.clone(), "wrong".into()).await.is_err());
+        assert!(!srv.home.join(".ssh/authorized_keys").exists());
+
+        // The right one gets in, and the key is added exactly once however often it is set up.
+        assert_eq!(r.machine.install_key_as(public.clone(), PASSWORD.into()).await.unwrap(), public);
+        assert!(r.machine.is_online());
+        r.machine.install_key_as(public.clone(), PASSWORD.into()).await.unwrap();
+        assert_eq!(std::fs::read_to_string(srv.home.join(".ssh/authorized_keys")).unwrap(), format!("{public}\n"));
+        assert_eq!(std::fs::metadata(srv.home.join(".ssh/authorized_keys")).unwrap().permissions().mode() & 0o077, 0, "private to the account");
+
+        // The password was for that connection only: without it (this test server never learns new keys) sign-in fails again.
+        r.machine.disconnect();
+        assert!(r.machine.connect().await.is_err());
+        srv.stop.shutdown("done".into());
     });
 }

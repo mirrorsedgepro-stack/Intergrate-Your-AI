@@ -203,7 +203,7 @@ impl App {
             ui.add_space(6.0);
         };
         egui::Modal::new(egui::Id::unique("share")).frame(egui::Frame::new().fill(PANEL).stroke(egui::Stroke::new(1.0, LINE2)).corner_radius(12).inner_margin(16)).show(&self.ctx, |ui| {
-            ui.set_width(680.0f32.min(screen.width() - 60.0));
+            ui.set_width(680.0f32.min(screen.width() - if self.compact { 44.0 } else { 60.0 }));
             ui.horizontal(|ui| { ui.label(RichText::new("Share your machines").size(16.0).strong()); ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { if icon_btn(ui, "x", "Close").clicked() { todo = Do::Close; } }); });
             egui::ScrollArea::vertical().max_height(screen.height() - 150.0).min_scrolled_height((screen.height() - 150.0).max(120.0)).show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -262,7 +262,7 @@ impl App {
                         });
                         if !ts.can_encrypt { ui.label(RichText::new("No keychain is available on this computer (on Linux: gnome-keyring or KWallet), so a credential can't be saved.").color(WARN)); }
                         ui.horizontal(|ui| {
-                            ui.add(egui::TextEdit::singleline(&mut sh.token).password(true).hint_text("tskey-client-… or tskey-api-…").desired_width(380.0));
+                            ui.add(egui::TextEdit::singleline(&mut sh.token).password(true).hint_text("tskey-client-… or tskey-api-…").desired_width(380.0f32.min(screen.width() - 190.0)));
                             if ui.add_enabled(!sh.busy, egui::Button::new(RichText::new("Save").color(BG).strong()).fill(BRAND)).clicked() { todo = Do::SaveToken; }
                         });
                     }
@@ -299,7 +299,7 @@ impl App {
 
                 step(ui, 5, "Guests", false, &mut |ui| {
                     ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(&mut sh.email).hint_text("friend@example.com").desired_width(300.0));
+                        ui.add(egui::TextEdit::singleline(&mut sh.email).hint_text("friend@example.com").desired_width(300.0f32.min(screen.width() - 190.0)));
                         if ui.add_enabled(!sh.busy, egui::Button::new(RichText::new("Invite").color(BG).strong()).fill(BRAND)).clicked() { todo = Do::Invite; }
                     });
                     if let Some((email, message, _)) = &sh.result {
@@ -324,7 +324,7 @@ impl App {
             ui.label(RichText::new("Got an invite code?").strong());
             ui.label(dim("Sign in to Tailscale with the invite link first, then paste the code to add the shared machines."));
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut sh.code).hint_text("nexus-invite:…").desired_width(440.0));
+                ui.add(egui::TextEdit::singleline(&mut sh.code).hint_text("nexus-invite:…").desired_width(440.0f32.min(screen.width() - 190.0)));
                 if ui.button("Add machines").clicked() { todo = Do::JoinCode; }
             });
         });

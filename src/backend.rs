@@ -120,7 +120,24 @@ impl TrustStore for Trust {
     }
 }
 
-fn keyring_entry() -> Result<keyring::Entry, String> { keyring::Entry::new("Nexus", "tailscale-credential").map_err(|e| e.to_string()) }
+/// Where the Tailscale credential is kept. Desktop: the OS keychain. Android: a file in the app's private storage,
+/// which the system keeps from every other app (and from backups: see the manifest).
+#[cfg(not(target_os = "android"))]
+mod secret {
+    fn entry() -> Result<keyring::Entry, String> { keyring::Entry::new("Nexus", "tailscale-credential").map_err(|e| e.to_string()) }
+    pub fn get() -> Option<String> { entry().ok()?.get_password().ok() }
+    pub fn set(value: &str) -> Result<(), String> { entry().and_then(|e| e.set_password(value).map_err(|e| e.to_string())) }
+    pub fn clear() { if let Ok(e) = entry() { let _ = e.delete_credential(); } }
+    pub fn available() -> bool { keyring::Entry::store_status().is_ok() }
+}
+#[cfg(target_os = "android")]
+mod secret {
+    fn file() -> std::path::PathBuf { crate::config::dir().join("secrets").join("tailscale-credential") }
+    pub fn get() -> Option<String> { std::fs::read_to_string(file()).ok() }
+    pub fn set(value: &str) -> Result<(), String> { super::write_private(&file(), value.as_bytes()) }
+    pub fn clear() { let _ = std::fs::remove_file(file()); }
+    pub fn available() -> bool { true }
+}
 
 impl Backend {
     pub fn new(rt: tokio::runtime::Handle, cfg: Config, tx: mpsc::Sender<Event>, wake: Box<dyn Fn() + Send + Sync>) -> Arc<Self> {
@@ -618,9 +635,9 @@ impl Backend {
     pub fn mcp_launched(&self, req: u64, result: Result<Value, String>) { if let Some(tx) = self.launch_waits.lock().unwrap().remove(&req) { let _ = tx.send(result); } }
 
     // ---------------------------------------------------------------- Tailscale (sharing SSH machines with guests)
-    // The credential lives in the OS keychain (Windows Credential Manager, macOS Keychain, Secret Service) and never
-    // reaches config.json or the UI.
-    fn ts_token() -> Option<String> { keyring_entry().ok()?.get_password().ok().filter(|t| !t.is_empty()) }
+    // The credential lives in the OS keychain (Windows Credential Manager, macOS Keychain, Secret Service; on Android,
+    // the app's private storage) and never reaches config.json or the UI.
+    fn ts_token() -> Option<String> { secret::get().filter(|t| !t.is_empty()) }
     fn ts_api(&self) -> Result<Arc<TailscaleApi>, String> {
         let t = Self::ts_token().ok_or("Add a Tailscale API access token or OAuth client first")?;
         let mut c = self.ts_client.lock().unwrap();
@@ -633,7 +650,7 @@ impl Backend {
     pub async fn ts_status(&self) -> TsStatus {
         self.blocking(|| {
             let t = Self::ts_token();
-            TsStatus { local: tailscale::local_status(), token_kind: t.as_deref().and_then(tailscale::parse_credential).map(|c| c.kind()), has_token: t.is_some(), can_encrypt: keyring::Entry::store_status().is_ok() }
+            TsStatus { local: tailscale::local_status(), token_kind: t.as_deref().and_then(tailscale::parse_credential).map(|c| c.kind()), has_token: t.is_some(), can_encrypt: secret::available() }
         }).await.unwrap_or_default()
     }
     pub async fn ts_set_token(&self, token: String) -> Result<usize, String> {
@@ -641,14 +658,14 @@ impl Backend {
             let t = token.trim().to_string();
             let cred = tailscale::parse_credential(&t).ok_or("That does not look like a Tailscale credential: paste an API access token (tskey-api-…) or an OAuth client secret (tskey-client-…, optionally as clientId:secret)")?;
             let devices = TailscaleApi::new(cred, tailscale::ureq_http()).devices()?; // validates the credential (and, for OAuth, its scopes)
-            keyring_entry().and_then(|e| e.set_password(&t).map_err(|e| e.to_string()))
+            secret::set(&t)
                 .map_err(|e| format!("Secure storage (Windows Credential Manager, macOS Keychain or a Linux keyring such as gnome-keyring/KWallet) is unavailable; the token was not saved ({e})"))?;
             Ok(devices.len())
         }).await?
     }
     pub async fn ts_clear_token(&self) {
         *self.ts_client.lock().unwrap() = None;
-        let _ = self.blocking(|| { if let Ok(e) = keyring_entry() { let _ = e.delete_credential(); } }).await;
+        let _ = self.blocking(secret::clear).await;
     }
     /// Everything the sharing panel shows: shared devices, guests (policy group), their join state, pending invites.
     pub async fn ts_overview(&self, machines: Vec<SparkArg>) -> Result<Overview, String> {
@@ -810,7 +827,7 @@ pub fn clean_paste_dir() {
         if e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > week) { let _ = std::fs::remove_file(e.path()); }
     }
 }
-fn write_private(path: &std::path::Path, data: &[u8]) -> Result<(), String> {
+pub fn write_private(path: &std::path::Path, data: &[u8]) -> Result<(), String> {
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
         #[cfg(unix)]

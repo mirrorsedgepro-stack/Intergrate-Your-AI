@@ -71,7 +71,7 @@ impl App {
         let mut result: Option<DialogResult> = None;
         let esc = self.ctx.input(|i| i.key_pressed(Key::Escape));
         egui::Modal::new(egui::Id::unique(("dialog", self.dialogs.len()))).frame(modal_frame()).show(&self.ctx, |ui| {
-            ui.set_width(460.0);
+            ui.set_width(460.0f32.min(self.ctx.content_rect().width() - 48.0));
             ui.label(RichText::new(&d.title).size(16.0).strong());
             ui.add_space(6.0);
             if !d.desc.is_empty() { ui.label(RichText::new(&d.desc).color(TEXT2)); ui.add_space(8.0); }
@@ -174,8 +174,8 @@ impl App {
                     items.push(item("Workspaces", name, sub, "", Icon::Glyph("layout"), None, act(move |app| app.open_layout(&snap, false))));
                 }
                 items.push(item("Manage", "Save current layout as workspace…".into(), String::new(), "", Icon::Glyph("save"), None, act(App::save_workspace)));
-                items.push(item("Manage", "Export workspaces and presets to a file…".into(), String::new(), "", Icon::Glyph("send"), None, act(App::export_workspaces)));
-                items.push(item("Manage", "Import workspaces and presets from a file…".into(), String::new(), "", Icon::Glyph("folder"), None, act(App::import_workspaces)));
+                items.push(item("Manage", if IS_ANDROID { "Copy workspaces and presets to the clipboard" } else { "Export workspaces and presets to a file…" }.into(), String::new(), "", Icon::Glyph("send"), None, act(App::export_workspaces)));
+                items.push(item("Manage", if IS_ANDROID { "Import workspaces and presets from the clipboard" } else { "Import workspaces and presets from a file…" }.into(), String::new(), "", Icon::Glyph("folder"), None, act(App::import_workspaces)));
                 for w in ws { let name = w.name.clone().unwrap_or_default(); let n2 = name.clone(); items.push(item("Manage", format!("Delete workspace \"{name}\""), String::new(), "", Icon::Glyph("trash"), None, act(move |app| app.delete_workspace(&n2)))); }
                 return (if ws.is_empty() { "No workspaces yet. Arrange your panes, then save one".into() } else { "Open a workspace…".into() }, items);
             }
@@ -252,8 +252,8 @@ impl App {
         cmd("Team chat", "Ctrl+Shift+M", "chat", act(|a| a.open_team(None)));
         cmd("Save layout as workspace…", "", "save", act(App::save_workspace));
         cmd("Queue: launches waiting for a free machine…", "", "clock", act(|a| a.open_picker(PalSource::Queue, "")));
-        cmd("Export workspaces and presets…", "", "send", act(App::export_workspaces));
-        cmd("Import workspaces and presets…", "", "folder", act(App::import_workspaces));
+        cmd(if IS_ANDROID { "Copy workspaces and presets to the clipboard" } else { "Export workspaces and presets…" }, "", "send", act(App::export_workspaces));
+        cmd(if IS_ANDROID { "Import workspaces and presets from the clipboard" } else { "Import workspaces and presets…" }, "", "folder", act(App::import_workspaces));
         cmd("Publish my presets to the team", "", "send", act(App::publish_presets));
         cmd("Import team presets…", "", "folder", act(App::import_team_presets));
         if let Some(f) = self.focused() { cmd(&format!("Send last reply from {} to…", self.sessions[&f].name), "Ctrl+Shift+S", "send", act(move |a| a.send_last_reply(f))); }
@@ -482,7 +482,12 @@ impl App {
         let esc = self.dialogs.is_empty() && self.ctx.input(|i| i.key_pressed(Key::Escape));
         let screen = self.ctx.content_rect();
         egui::Modal::new(egui::Id::unique("settings")).frame(modal_frame()).show(&self.ctx, |ui| {
-            ui.set_width(760.0f32.min(screen.width() - 60.0));
+            // A phone: nearly the whole width, rows of fields wrap, and no field is wider than the dialog.
+            let compact = self.compact;
+            let width = 760.0f32.min(screen.width() - if compact { 44.0 } else { 60.0 });
+            let fmax = width - 36.0;
+            let row = |ui: &mut egui::Ui, add: &mut dyn FnMut(&mut egui::Ui)| { if compact { ui.vertical(|ui| add(ui)); } else { ui.horizontal(|ui| add(ui)); } };
+            ui.set_width(width);
             ui.horizontal(|ui| { ui.label(RichText::new("Settings").size(16.0).strong()); ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { if icon_btn(ui, "x", "Close").clicked() { todo = Do::Cancel; } }); });
             egui::ScrollArea::vertical().max_height(screen.height() - 190.0).min_scrolled_height((screen.height() - 190.0).max(120.0)).show(ui, |ui| {
                 section(ui, "Machines");
@@ -497,8 +502,8 @@ impl App {
                             ui.label(dim(if ssh { "ssh · linux".to_string() } else if m.is_wsl() { format!("wsl · {}", m.distro) } else { "this computer".to_string() }).size(11.0));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { if ssh && ssh_count > 1 && ui.add(egui::Button::new(RichText::new("Remove").color(BAD)).frame(false)).clicked() { todo = Do::Remove(idx); } });
                         });
-                        ui.horizontal(|ui| {
-                            field(ui, "Name", |ui| { ui.add(egui::TextEdit::singleline(&mut m.name).desired_width(200.0)); });
+                        row(ui, &mut |ui| {
+                            field(ui, "Name", |ui| { ui.add(egui::TextEdit::singleline(&mut m.name).desired_width(200.0f32.min(fmax))); });
                             field(ui, "Accent", |ui| { let c = hex(&m.color); let mut rgb = [c.r(), c.g(), c.b()]; if ui.color_edit_button_srgb(&mut rgb).changed() { m.color = to_hex(Color32::from_rgb(rgb[0], rgb[1], rgb[2])); } });
                             field(ui, "Icon", |ui| {
                                 egui::ComboBox::from_id_salt(("icon", idx)).selected_text(match m.icon.as_str() { "windows" => "Windows", "linux" => "Linux", "nvidia" => "NVIDIA", _ => "Auto" }).show_ui(ui, |ui| {
@@ -507,8 +512,8 @@ impl App {
                             });
                         });
                         if !ssh { return; }
-                        let mono = |s: &mut String, hint: &str, w: f32, ui: &mut egui::Ui| { let r = ui.add(egui::TextEdit::singleline(s).hint_text(hint).font(egui::TextStyle::Monospace).desired_width(w)); if r.changed() { *s = s.trim().to_string(); } };
-                        ui.horizontal(|ui| {
+                        let mono = |s: &mut String, hint: &str, w: f32, ui: &mut egui::Ui| { let r = ui.add(egui::TextEdit::singleline(s).hint_text(hint).font(egui::TextStyle::Monospace).desired_width(w.min(fmax))); if r.changed() { *s = s.trim().to_string(); } };
+                        row(ui, &mut |ui| {
                             field(ui, "User", |ui| mono(&mut m.user, "from ~/.ssh/config", 150.0, ui));
                             field(ui, "Host / IP", |ui| mono(&mut m.host, "192.168.1.50 or linuxbox.local", 260.0, ui));
                             field(ui, "Port", |ui| { let mut p = if m.port == 0 { 22 } else { m.port }; if ui.add(egui::DragValue::new(&mut p).range(1..=65535)).changed() { m.port = p; } });
@@ -535,13 +540,13 @@ impl App {
 
                 section(ui, "Appearance & behaviour");
                 let d = &mut st.draft;
-                ui.horizontal(|ui| {
+                row(ui, &mut |ui| {
                     field(ui, "Font size", |ui| { ui.add(egui::DragValue::new(&mut d.appearance.font_size).range(9.0..=28.0).speed(0.25)); });
                     field(ui, "Line height", |ui| { ui.add(egui::DragValue::new(&mut d.appearance.line_height).range(1.0..=2.0).speed(0.01)); });
-                    field(ui, "Font family", |ui| { ui.add(egui::TextEdit::singleline(&mut d.appearance.font_family).font(egui::TextStyle::Monospace).desired_width(440.0)); });
+                    field(ui, "Font family", |ui| { ui.add(egui::TextEdit::singleline(&mut d.appearance.font_family).font(egui::TextStyle::Monospace).desired_width(440.0f32.min(fmax))); });
                 });
-                ui.horizontal(|ui| {
-                    field(ui, "Your name in team chat", |ui| { ui.add(egui::TextEdit::singleline(&mut d.collab.name).hint_text(self.team.ts_user.as_ref().map_or("from Tailscale", |u| u.name.as_str())).desired_width(240.0)); });
+                row(ui, &mut |ui| {
+                    field(ui, "Your name in team chat", |ui| { ui.add(egui::TextEdit::singleline(&mut d.collab.name).hint_text(self.team.ts_user.as_ref().map_or("from Tailscale", |u| u.name.as_str())).desired_width(240.0f32.min(fmax))); });
                     field(ui, "Team chat lives on", |ui| {
                         let hubs: Vec<(String, String)> = d.machines.iter().filter(|m| m.is_ssh()).filter_map(|m| { let h = self.host_of(&m.id); (!h.is_empty()).then(|| (h.clone(), format!("{} ({h})", m.name))) }).collect();
                         let cur = hubs.iter().find(|(h, _)| *h == d.collab.hub).map_or("Auto (first SSH machine by hostname)".to_string(), |x| x.1.clone());
@@ -555,16 +560,17 @@ impl App {
                 ui.checkbox(&mut d.appearance.notify_when_done, "Notify when a background agent finishes");
                 ui.checkbox(&mut d.collab.announce, "Post in team chat when I start an agent on a shared machine");
                 field(ui, "Phone alerts: an ntfy topic address (ntfy.sh or your own server). Told when an agent finishes or needs you while Nexus isn't in front. Anyone who knows the address can read the alerts, so pick a long random topic.", |ui| {
-                    ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(&mut d.push.url).hint_text("https://ntfy.sh/nexus-7f3k2m9x1q").font(egui::TextStyle::Monospace).desired_width(420.0));
+                    row(ui, &mut |ui| {
+                        ui.add(egui::TextEdit::singleline(&mut d.push.url).hint_text("https://ntfy.sh/nexus-7f3k2m9x1q").font(egui::TextStyle::Monospace).desired_width(420.0f32.min(fmax)));
                         if ui.add_enabled(!d.push.url.trim().is_empty(), egui::Button::new("Send a test")).clicked() { todo = Do::PushTest(d.push.url.trim().to_string()); }
                     });
                 });
                 if !d.push.url.trim().is_empty() { ui.checkbox(&mut d.push.include_text, "Include what the agent said in phone alerts (off: only which session is waiting)"); }
                 ui.checkbox(&mut d.appearance.restore_session, "Restore sessions, layout and folders when Nexus starts");
                 ui.checkbox(&mut d.appearance.record_sessions, "Record remote sessions to ~/.nexus/logs on the machine (audit trail; kept 30 days)");
-                ui.checkbox(&mut d.mcp.enabled, "Let MCP clients on this PC control Nexus (list machines, launch agents, send text, read output)");
-                if d.mcp.enabled {
+                // Android has no MCP clients to connect (and no bridge program to give them).
+                if !IS_ANDROID { ui.checkbox(&mut d.mcp.enabled, "Let MCP clients on this PC control Nexus (list machines, launch agents, send text, read output)"); }
+                if d.mcp.enabled && !IS_ANDROID {
                     ui.horizontal(|ui| {
                         ui.add_space(24.0);
                         let cmd = format!("claude mcp add nexus -- \"{}\"", mcp_bridge_path());
@@ -576,7 +582,7 @@ impl App {
             });
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.add(egui::Button::new("Open config file").frame(false)).clicked() { todo = Do::OpenFile; }
+                if !IS_ANDROID && ui.add(egui::Button::new("Open config file").frame(false)).clicked() { todo = Do::OpenFile; }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { if primary_btn(ui, "Save").clicked() { todo = Do::Save; } if ui.button("Cancel").clicked() { todo = Do::Cancel; } });
             });
         });
@@ -591,7 +597,7 @@ impl App {
             Do::None => {}
             Do::Save => { self.save_settings(); self.close_settings(); self.toast_ok("Settings saved"); }
             Do::Cancel => self.close_settings(),
-            Do::OpenFile => { let _ = open::that_detached(crate::config::file()); }
+            Do::OpenFile => { crate::platform::open_path(&crate::config::file()); }
             Do::Add => { if let Some(s) = self.settings.as_mut() { s.draft.machines.push(Machine { id: format!("ssh-{}", crate::remote::radix36(now_ms() as u64)), name: "New machine".into(), kind: "ssh".into(), os: "linux".into(), port: 22, color: "#7dcfff".into(), ..Default::default() }); } }
             Do::Remove(i) => { if let Some(s) = self.settings.as_mut() { s.draft.machines.remove(i); } }
             Do::Test(id) => if needs_host(self, &id) {
@@ -675,7 +681,7 @@ impl App {
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Max), |ui| {
                 for (i, t) in self.toasts.iter().enumerate().rev() {
                     egui::Frame::new().fill(PANEL3).stroke(egui::Stroke::new(1.0, tint(t.color, 0.5))).corner_radius(9).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
-                        ui.set_max_width(440.0);
+                        ui.set_max_width(440.0f32.min(screen.width() - 44.0));
                         ui.horizontal_wrapped(|ui| {
                             ui.label(RichText::new("●").size(9.0).color(t.color));
                             ui.label(&t.msg);
@@ -728,17 +734,28 @@ impl App {
         let text_focus = self.text_has_focus();
         let events = self.ctx.input(|i| i.events.clone());
         let target = self.focused();
+        // Ctrl / Alt from the touch keys row apply to the next key, whichever way the on-screen keyboard reports it
+        // (as a key, as text, or as both in one frame).
+        let (sticky_ctrl, sticky_alt) = (self.sticky_ctrl && !text_focus, self.sticky_alt && !text_focus);
+        let sticky = sticky_ctrl || sticky_alt;
+        let mut sticky_used = false;
         for ev in events {
             match ev {
                 egui::Event::Key { key, pressed: true, modifiers, .. } => {
+                    let modifiers = if sticky { Modifiers { ctrl: modifiers.ctrl || sticky_ctrl, command: modifiers.command || (sticky_ctrl && !IS_MAC), alt: modifiers.alt || sticky_alt, ..modifiers } } else { modifiers };
                     // In a text box only the Ctrl+Shift combos are app shortcuts; the rest is typing.
-                    if (!text_focus || (modifiers.command && modifiers.shift)) && self.shortcut(key, modifiers) { continue; }
+                    if (!text_focus || (modifiers.command && modifiers.shift)) && self.shortcut(key, modifiers) { sticky_used |= sticky; continue; }
                     if text_focus { continue; }
                     let Some(id) = target else { continue };
                     if IS_MAC && modifiers.mac_cmd { continue; } // other Cmd combos belong to the app, never to the shell
                     if key == Key::PageUp && modifiers.shift { if let Some(s) = self.sessions.get_mut(&id) { s.term.scroll(i32::from(s.term.rows) - 1); } continue; }
                     if key == Key::PageDown && modifiers.shift { if let Some(s) = self.sessions.get_mut(&id) { s.term.scroll(1 - i32::from(s.term.rows)); } continue; }
-                    if let Some(bytes) = self.sessions.get(&id).and_then(|s| s.term.key_bytes(key, modifiers)) { self.input(id, &bytes); }
+                    if let Some(bytes) = self.sessions.get(&id).and_then(|s| s.term.key_bytes(key, modifiers)) { self.input(id, &bytes); sticky_used |= sticky; }
+                }
+                egui::Event::Text(t) if !text_focus && sticky => {
+                    // Already sent as a key above? Then this is the same keystroke again.
+                    if let (false, Some(id)) = (sticky_used, target) { self.input(id, &super::touch::sticky_bytes(&t, sticky_ctrl, sticky_alt)); }
+                    sticky_used = true;
                 }
                 egui::Event::Text(t) if !text_focus => {
                     let m = self.ctx.input(|i| i.modifiers);
@@ -756,6 +773,7 @@ impl App {
                 _ => {}
             }
         }
+        if sticky_used { (self.sticky_ctrl, self.sticky_alt) = (false, false); }
     }
 }
 
