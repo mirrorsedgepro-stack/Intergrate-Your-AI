@@ -207,10 +207,12 @@ Xvfb and takes screenshots, for checking that controls respond: `python3 scripts
 CI runs the tests on Windows, macOS and Linux on every push and builds the installers on pull requests. To publish a
 release, bump `version` in `Cargo.toml` and push it to main (or push a matching tag, `git tag v2.0.1 && git push --tags`).
 The Release workflow builds the Windows, macOS and Linux installers into a **draft** release, then
-`verify-and-publish.yml` scans them: **VirusTotal** (~70 engines, every installer) and **Microsoft Defender** (Windows
-installer) must both be clean, and ClamAV ([hugoalh/scan-virus-ghaction](https://github.com/hugoalh/scan-virus-ghaction))
-runs as a reported check. Only then is the release published, with the VirusTotal reports, the scan log and SHA-256
-checksums in its notes. The workflow needs a `VT_API_KEY` repository secret.
+`verify-and-publish.yml` scans them: **Microsoft Defender** (Windows installer) must be clean, and ClamAV
+([hugoalh/scan-virus-ghaction](https://github.com/hugoalh/scan-virus-ghaction)) runs on every installer as a reported
+check. Only then is the release published, with the scan results, the scan log and SHA-256 checksums in its notes.
+VirusTotal is not part of a release (its single-engine heuristic verdicts on the unsigned Windows installer held back
+2.0.0 and 2.0.1); the manual **VirusTotal check** workflow still gives a multi-engine verdict for a release's Windows
+installer and needs a `VT_API_KEY` repository secret.
 
 **Code signing** switches on when its repository secrets exist; without them installers are unsigned (the macOS app is
 ad-hoc signed so it runs on Apple Silicon). Windows (Authenticode): `WINDOWS_CERT_PFX_BASE64` (the .pfx, base64) and

@@ -3,8 +3,8 @@ name: Release
 # Push a tag like v2.0.0 (matching "version" in Cargo.toml), or push a "version" bump in Cargo.toml to main, to build
 # installers for Windows, macOS and Linux. (A version bump on main releases v<version> unless that tag or release
 # already exists; the tag is created when the release is published.)
-# They are uploaded to a draft release, scanned (VirusTotal + Microsoft Defender block; ClamAV is reported), and the
-# release is published only if the blocking scans are clean.
+# They are uploaded to a draft release, scanned (Microsoft Defender blocks; ClamAV is reported), and the
+# release is published only if the blocking scan is clean.
 # Installed copies of Nexus then pick it up automatically.
 on:
   push:
@@ -131,7 +131,7 @@ jobs:
           TAG: ${{ needs.version.outputs.tag }}
         run: gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
 
-  # VirusTotal + Microsoft Defender gate (blocking) and ClamAV (reported), then publish: see verify-and-publish.yml.
+  # Microsoft Defender gate (blocking) and ClamAV (reported), then publish: see verify-and-publish.yml.
   verify:
     needs: [version, build]
     uses: ./.github/workflows/verify-and-publish.yml
