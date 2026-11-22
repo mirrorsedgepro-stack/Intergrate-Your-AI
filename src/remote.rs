@@ -763,7 +763,7 @@ mod tests {
     #[test]
     fn commands_reach_sh_untouched_whatever_the_login_shell() {
         // What the login shell is asked to parse holds nothing any shell treats specially inside single quotes.
-        let script = "if command -v tmux >/dev/null 2>&1; then printf '%s\\n' \"it's $HOME\" 'a\\b' \"100%\"; else echo no; fi\nfor f in a b; do echo \"$f!\"; done; echo ünï `echo tick` $(echo sub)";
+        let script = "if command -v sh >/dev/null 2>&1; then printf '%s\\n' \"it's $HOME\" 'a\\b' \"100%\"; else echo no; fi\nfor f in a b; do echo \"$f!\"; done; echo ünï `echo tick` $(echo sub)";
         let wrapped = posix(script);
         let inner = wrapped.strip_prefix("sh -c 'eval \"$(printf \"").unwrap().strip_suffix("\")\"'").unwrap();
         assert!(inner.chars().all(|c| c.is_ascii_alphanumeric() || " _./:=,@+-\\".contains(c)), "{inner}");
