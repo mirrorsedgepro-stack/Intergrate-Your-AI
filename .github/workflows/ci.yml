@@ -42,7 +42,7 @@ jobs:
         run: cargo clippy --locked --all-targets
       - name: Shell script syntax
         shell: bash
-        run: bash -n scripts/linux-bootstrap.sh && bash -n scripts/setup-ssh-key.sh && bash -n scripts/package-macos.sh
+        run: bash -n scripts/linux-bootstrap.sh && bash -n scripts/setup-ssh-key.sh && bash -n scripts/package-macos.sh && bash -n scripts/package-android.sh
 
   # Build the installers the Release workflow would publish, so packaging problems show up on the pull request.
   package:
@@ -73,4 +73,29 @@ jobs:
         with:
           name: installer-${{ runner.os }}
           path: dist/*
+          retention-days: 7
+
+  # The Android app: the same script the Release workflow runs (signed with a throwaway key here).
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Rust toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-android-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-android-
+      - name: Build the APK
+        run: scripts/package-android.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: installer-Android
+          path: dist/*.apk
           retention-days: 7

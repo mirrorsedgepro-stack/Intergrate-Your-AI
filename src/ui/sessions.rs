@@ -452,6 +452,7 @@ impl App {
         if !self.sessions.contains_key(&id) { return; }
         let i = self.panes.iter().position(|p| *p == Some(id)).unwrap_or_else(|| { let i = self.focus.min(self.panes.len() - 1); self.panes[i] = Some(id); i });
         self.focus = i;
+        self.drawer = false;
         self.touch_mru(id);
         self.clear_done(id);
         self.focus_terminal();
@@ -584,24 +585,37 @@ impl App {
     // The file carries workspaces, presets and a machine index (name/host) so sessions can be re-pointed at the
     // importer's own machines. No addresses are required to match: unmatched sessions are skipped, not guessed.
     pub fn export_workspaces(&mut self) {
+        #[cfg(not(target_os = "android"))]
         let Some(path) = rfd::FileDialog::new().set_title("Export workspaces and presets").set_file_name("nexus-workspaces.json").add_filter("JSON", &["json"]).save_file() else { return };
         let c = &self.cfg;
         let data = serde_json::json!({
             "nexus": 1, "exportedAt": chrono::Utc::now().to_rfc3339(), "presets": c.presets, "workspaces": c.workspaces,
             "machines": c.machines.iter().map(|m| serde_json::json!({ "id": m.id, "name": m.name, "type": m.kind, "host": m.host, "tsHost": m.ts_host, "hostname": self.mst(&m.id).hostname })).collect::<Vec<_>>(),
         });
-        match std::fs::write(&path, serde_json::to_string_pretty(&data).unwrap_or_default()) {
-            Ok(()) => self.toast_ok(format!("Exported {} workspace{} and {} presets", c.workspaces.len(), if c.workspaces.len() == 1 { "" } else { "s" }, c.presets.len())),
+        let text = serde_json::to_string_pretty(&data).unwrap_or_default();
+        let what = format!("{} workspace{} and {} presets", c.workspaces.len(), if c.workspaces.len() == 1 { "" } else { "s" }, c.presets.len());
+        // Android has no file dialog here: the export travels by clipboard (into a note, a message, another Nexus).
+        #[cfg(target_os = "android")]
+        { self.ctx.copy_text(text); self.toast(format!("Copied {what} to the clipboard"), OK, 5000); }
+        #[cfg(not(target_os = "android"))]
+        match std::fs::write(&path, text) {
+            Ok(()) => self.toast_ok(format!("Exported {what}")),
             Err(e) => self.toast_bad(e.to_string()),
         }
     }
     pub fn import_workspaces(&mut self) {
-        let Some(path) = rfd::FileDialog::new().set_title("Import workspaces and presets").add_filter("JSON", &["json"]).pick_file() else { return };
-        let data = match std::fs::metadata(&path).map(|m| m.len()) {
-            Ok(n) if n > 4 * 1024 * 1024 => { self.toast_bad("That file is too large to be a Nexus export"); return; }
-            _ => std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()).filter(|d| d["nexus"] == 1),
+        #[cfg(not(target_os = "android"))]
+        let text = {
+            let Some(path) = rfd::FileDialog::new().set_title("Import workspaces and presets").add_filter("JSON", &["json"]).pick_file() else { return };
+            match std::fs::metadata(&path).map(|m| m.len()) {
+                Ok(n) if n > 4 * 1024 * 1024 => { self.toast_bad("That file is too large to be a Nexus export"); return; }
+                _ => std::fs::read_to_string(&path).ok(),
+            }
         };
-        let Some(data) = data else { self.toast_bad("Not a Nexus export file"); return };
+        #[cfg(target_os = "android")]
+        let text = crate::android::get_clipboard().filter(|t| t.len() <= 4 * 1024 * 1024);
+        let data = text.and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()).filter(|d| d["nexus"] == 1);
+        let Some(data) = data else { self.toast_bad(if crate::platform::IS_ANDROID { "The clipboard doesn't hold a Nexus export: copy the exported text first" } else { "Not a Nexus export file" }); return };
         // Map a machine from the export onto one of ours: same id, else same address, else same name.
         let s = |v: &serde_json::Value, k: &str| v[k].as_str().unwrap_or_default().to_string();
         let mut map: HashMap<String, String> = HashMap::new();
@@ -759,7 +773,32 @@ impl App {
     pub fn setup_key(&mut self, machine_id: &str) {
         let m = self.machine(machine_id);
         if m.host.is_empty() { self.open_settings(); return; }
+        if crate::platform::IS_ANDROID || crate::platform::which("ssh-keygen").is_none() { self.setup_key_here(machine_id); return; }
         self.launch("local", "shell", Extra { script: Some("setup-ssh-key".into()), script_machine: Some(machine_id.into()), name: Some(format!("SSH key → {}", m.name)), ..Default::default() });
+    }
+    /// Where there are no ssh programs to run the helper script with (Android): Nexus makes this device's key and
+    /// installs it itself, signing in once with the account's password.
+    fn setup_key_here(&mut self, machine_id: &str) {
+        let (m, mid) = (self.machine(machine_id), machine_id.to_string());
+        let who = if m.user.is_empty() { m.host.clone() } else { format!("{}@{}", m.user, m.host) };
+        self.prompt(&format!("Set up SSH key for {}", m.name),
+            &format!("Nexus makes an SSH key for this device, kept in its private storage, and adds it to {who} so it can connect without a password from then on. Enter that account's password: it is used once, for this, and is not saved."),
+            "Password", "", "", true, move |app, v| {
+                let Some(password) = v.filter(|p| !p.is_empty()) else { return };
+                let (be, mid2, mid3, name) = (app.be.clone(), mid.clone(), mid.clone(), app.machine(&mid).name);
+                app.toast(format!("Signing in to {name}…"), TEXT2, 4000);
+                app.be.run(async move { be.machine(&mid2).install_key(password).await }, move |app, r| match r {
+                    Ok(_) => { app.manual_disconnect.remove(&mid3); app.toast(format!("{name} now accepts this device's key"), OK, 6000); app.refresh_machine(&mid3); }
+                    Err(e) => app.toast_bad(format!("Couldn't set up the key on {name}: {e}")),
+                });
+            });
+    }
+    /// This device's public key, for adding to a machine's ~/.ssh/authorized_keys by hand.
+    pub fn copy_device_key(&mut self) {
+        match crate::remote::device_key() {
+            Ok(key) => { self.ctx.copy_text(key); self.toast_ok("This device's public key is on the clipboard"); }
+            Err(e) => self.toast_bad(e),
+        }
     }
     pub fn enable_alerts(&mut self, machine_id: &str) {
         let (be, mid, name) = (self.be.clone(), machine_id.to_string(), self.machine(machine_id).name);

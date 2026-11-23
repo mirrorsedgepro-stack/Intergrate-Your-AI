@@ -260,6 +260,8 @@ struct State {
     declined_hosts: HashSet<String>,
     encrypted_keys: Vec<PathBuf>,
     tried_keys: String,
+    /// Offered once by "Set up SSH key" (see install_key); never stored.
+    password: Option<String>,
 }
 struct Conn { handle: Arc<Handle>, jumps: Vec<Arc<Handle>> }
 
@@ -412,6 +414,12 @@ impl Machine {
             }
         }
         if !m.invited && agent_auth(h, user, &mut tried).await { return Ok(()); }
+        // Only "Set up SSH key" offers a password, and only to the machine itself (never to a jump host).
+        let password = if record { self.state.lock().unwrap().password.clone() } else { None };
+        if let Some(pw) = password {
+            tried.push("password".into());
+            if matches!(h.authenticate_password(user, pw).await.map_err(other)?, AuthResult::Success) { return Ok(()); }
+        }
         if record { self.state.lock().unwrap().tried_keys = if tried.is_empty() { "no usable keys".into() } else { tried.join(", ") }; }
         Err(Fail::Auth)
     }
@@ -556,6 +564,22 @@ impl Machine {
         if !unlocked { return Err(err.msg); }
         self.set_status(Status::Connecting, None);
         self.round(&m).await.map_err(|e| e.msg)
+    }
+
+    /// "Set up SSH key" without the ssh programs (Android has none): make this device's key if it has none, sign in
+    /// once with the account's password, and add the key to ~/.ssh/authorized_keys on the machine. The password is
+    /// used for that one connection and then forgotten. Returns the public key.
+    pub async fn install_key(self: &Arc<Self>, password: String) -> Result<String, String> { self.install_key_as(device_key()?, password).await }
+    pub async fn install_key_as(self: &Arc<Self>, public: String, password: String) -> Result<String, String> {
+        self.disconnect();
+        self.state.lock().unwrap().password = Some(password);
+        let connected = self.connect().await;
+        self.state.lock().unwrap().password = None;
+        connected?;
+        let k = shq(&public);
+        let out = self.sh(&format!("umask 077; mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && (grep -qxF {k} ~/.ssh/authorized_keys || echo {k} >> ~/.ssh/authorized_keys)"), 20).await?;
+        if out.code != Some(0) { return Err(format!("Signed in, but the key could not be added to ~/.ssh/authorized_keys: {}", crate::util::clip(out.stderr.trim(), 200))); }
+        Ok(public)
     }
 
     pub fn disconnect(self: &Arc<Self>) {
@@ -740,6 +764,27 @@ async fn agent_auth(h: &mut Handle, user: &str, tried: &mut Vec<String>) -> bool
         if h.authenticate_publickey_with(user, key, hash, &mut agent).await.is_ok_and(|r| r.success()) { return true; }
     }
     false
+}
+
+/// This device's own SSH key (~/.ssh/id_ed25519), made on first use: its public half, as one authorized_keys line.
+pub fn device_key() -> Result<String, String> { device_key_in(&ssh_dir()) }
+pub fn device_key_in(dir: &Path) -> Result<String, String> {
+    use russh::keys::ssh_key::LineEnding;
+    let key_file = dir.join("id_ed25519");
+    let pub_file = dir.join("id_ed25519.pub");
+    if !key_file.exists() {
+        let mut key = PrivateKey::random(&mut russh::keys::key::safe_rng(), russh::keys::Algorithm::Ed25519).map_err(|e| e.to_string())?;
+        key.set_comment("nexus");
+        let text = key.to_openssh(LineEnding::LF).map_err(|e| e.to_string())?;
+        crate::backend::write_private(&key_file, text.as_bytes())?;
+        std::fs::write(&pub_file, format!("{}\n", key.public_key().to_openssh().map_err(|e| e.to_string())?)).map_err(|e| e.to_string())?;
+    }
+    if let Some(line) = std::fs::read_to_string(&pub_file).ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) { return Ok(line); }
+    match load_secret_key(&key_file, None) {
+        Ok(k) => k.public_key().to_openssh().map_err(|e| e.to_string()),
+        Err(russh::keys::Error::KeyIsEncrypted) => Err("This device's key (~/.ssh/id_ed25519) has a passphrase and no .pub file beside it".into()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 pub fn key_file_name(p: &Path) -> String { p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default() }

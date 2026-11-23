@@ -247,7 +247,7 @@ impl Default for Config {
             mcp: McpCfg::default(),
             presets: default_presets(),
             machines: vec![
-                Machine { id: "local".into(), name: if os == "mac" { "This Mac" } else { "This PC" }.into(), kind: "local".into(), os: os.into(), color: "#7AA2F7".into(), ..Default::default() },
+                Machine { id: "local".into(), name: if crate::platform::IS_ANDROID { "This device" } else if os == "mac" { "This Mac" } else { "This PC" }.into(), kind: "local".into(), os: os.into(), color: "#7AA2F7".into(), ..Default::default() },
                 Machine { id: "linux".into(), name: "Linux box".into(), kind: "ssh".into(), os: "linux".into(), port: 22, color: "#BB9AF7".into(), ..Default::default() },
             ],
             known_hosts: BTreeMap::new(),

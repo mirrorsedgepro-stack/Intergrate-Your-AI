@@ -2606,9 +2606,10 @@ dependencies = [
 
 [[package]]
 name = "nexus-terminal"
-version = "2.0.2"
+version = "2.1.0"
 dependencies = [
  "alacritty_terminal",
+ "android-activity",
  "base64 0.23.1",
  "chrono",
  "dirs",
@@ -2619,7 +2620,10 @@ dependencies = [
  "fontdb",
  "hmac",
  "image",
+ "jni",
  "keyring",
+ "libc",
+ "ndk-context",
  "notify-rust",
  "open",
  "portable-pty",
