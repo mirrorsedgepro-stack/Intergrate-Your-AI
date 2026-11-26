@@ -124,7 +124,7 @@ impl App {
     pub fn launch_worktree(&mut self, machine_id: &str, preset_id: &str) { self.pick_launch_folder(machine_id, preset_id, true); }
     fn pick_launch_folder(&mut self, machine_id: &str, preset_id: &str, worktree: bool) {
         let m = self.machine(machine_id);
-        if m.is_ssh() && m.host.is_empty() && m.ts_host.is_empty() { self.open_settings(); return; }
+        if m.is_ssh() && !m.has_address() { self.open_settings(); return; }
         self.open_picker(PalSource::Folder { machine_id: machine_id.into(), preset_id: preset_id.into(), worktree }, "");
         if self.dir_cache.get(machine_id).is_some_and(|(at, _)| now_ms() - at < 60_000) { return; }
         let (be, mid) = (self.be.clone(), machine_id.to_string());
@@ -520,6 +520,7 @@ impl App {
                             field(ui, "Port", |ui| { let mut p = if m.port == 0 { 22 } else { m.port }; if ui.add(egui::DragValue::new(&mut p).range(1..=65535)).changed() { m.port = p; } });
                         });
                         field(ui, "Tailscale address (optional; used when the LAN address can't be reached. Filled in automatically by Share)", |ui| mono(&mut m.ts_host, "spark1.tail1234.ts.net", 480.0, ui));
+                        field(ui, "Twingate address (optional; the machine's Resource address in your Twingate network, used when the addresses above can't be reached)", |ui| mono(&mut m.tg_host, "spark1.internal or 10.0.0.5", 480.0, ui));
                         field(ui, "Private key (optional; default tries ~/.ssh/id_ed25519, id_ecdsa, id_rsa, then ssh-agent)", |ui| mono(&mut m.key_path, "~/.ssh/id_ed25519", 480.0, ui));
                         field(ui, "Jump host (optional, like ssh -J; blank uses ProxyJump from ~/.ssh/config)", |ui| mono(&mut m.jump, "user@bastion.example.com:22", 480.0, ui));
                         ui.horizontal_wrapped(|ui| {

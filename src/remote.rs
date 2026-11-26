@@ -219,8 +219,13 @@ impl std::fmt::Display for ConnError { fn fmt(&self, f: &mut std::fmt::Formatter
 
 enum Fail { Auth, Timeout, NotFound, Io(std::io::Error), Other(String) }
 
-fn friendly(f: &Fail, user: &str, host: &str, port: u16, tried: &str) -> (String, bool) {
+fn friendly(f: &Fail, user: &str, host: &str, port: u16, tried: &str, twingate: bool) -> (String, bool) {
     use std::io::ErrorKind as K;
+    // A Twingate Resource only resolves and answers while the Twingate client on this computer is connected.
+    let unreachable_io = |e: &std::io::Error| matches!(e.kind(), K::TimedOut | K::HostUnreachable | K::NetworkUnreachable);
+    if twingate && (matches!(f, Fail::Timeout | Fail::NotFound) || matches!(f, Fail::Io(e) if unreachable_io(e))) {
+        return (format!("Can't reach {host} through Twingate. Is the Twingate client on this computer connected, and is {host} a Resource you have access to?"), true);
+    }
     match f {
         Fail::Auth => (format!("Authentication failed for {}@{host} (tried {tried}). Use \"Set up SSH key\" in Settings.", if user.is_empty() { "?" } else { user }), false),
         Fail::Timeout => (format!("Timed out reaching {host}."), true),
@@ -441,7 +446,7 @@ impl Machine {
         if had && self.status() == Status::Online { self.set_status(Status::Offline, None); }
     }
 
-    /// One connection attempt to one address (LAN name/IP, or the machine's Tailscale address), through the jump
+    /// One connection attempt to one address (LAN name/IP, or the machine's Tailscale or Twingate address), through the jump
     /// chain if there is one (ssh -J): each hop is a full SSH connection whose forwarded channel carries the next.
     async fn attempt(self: &Arc<Self>, m: &config::Machine, address: &str, quick: bool) -> Result<(), ConnError> {
         // Blank Nexus fields fall back to ~/.ssh/config, exactly like the ssh command does.
@@ -470,7 +475,7 @@ impl Machine {
         let run = async {
             let mut chain: Vec<Arc<Handle>> = Vec::new();
             for (i, hop) in hops.iter().enumerate() {
-                let label = |f: Fail| if i < last { Fail::Other(format!("Jump host {}@{}:{}: {}", hop.user, hop.host, hop.port, verify.lock().unwrap().host_key_error.clone().unwrap_or_else(|| friendly(&f, &hop.user, &hop.host, hop.port, "your keys").0))) } else { f };
+                let label = |f: Fail| if i < last { Fail::Other(format!("Jump host {}@{}:{}: {}", hop.user, hop.host, hop.port, verify.lock().unwrap().host_key_error.clone().unwrap_or_else(|| friendly(&f, &hop.user, &hop.host, hop.port, "your keys", false).0))) } else { f };
                 let h = match chain.last() {
                     None => {
                         let addr = tokio::net::lookup_host((hop.host.as_str(), hop.port)).await.ok().and_then(|mut a| a.next()).ok_or(Fail::NotFound).map_err(label)?;
@@ -494,12 +499,12 @@ impl Machine {
             Err(f) => {
                 let v = std::mem::take(&mut *verify.lock().unwrap());
                 let tried = self.state.lock().unwrap().tried_keys.clone();
-                let (msg, unreachable) = friendly(&f, &hops[last].user, address, hops[last].port, &tried);
+                let (msg, unreachable) = friendly(&f, &hops[last].user, address, hops[last].port, &tried, m.is_twingate_address(address));
                 return Err(ConnError { msg: v.host_key_error.clone().unwrap_or(msg), auth_failed: matches!(f, Fail::Auth), unreachable: unreachable && v.host_key_error.is_none(), unknown_host: v.unknown_host });
             }
         };
         let handle = chain.pop().expect("at least the target hop");
-        let route = if is_tailnet_address(address) { "tailscale" } else if via_jump { "jump" } else { "lan" };
+        let route = if m.is_twingate_address(address) { "twingate" } else if is_tailnet_address(address) { "tailscale" } else if via_jump { "jump" } else { "lan" };
         *self.conn.lock().unwrap() = Some(Arc::new(Conn { handle, jumps: chain }));
         { let mut st = self.state.lock().unwrap(); st.home_dir = None; st.route = Some(route); }
         // ~/.nexus holds pasted screenshots, uploads and team chat: private to this account.
@@ -509,10 +514,10 @@ impl Machine {
         Ok(())
     }
 
-    /// Try the LAN address, then the machine's Tailscale address (away from home, or a guest's only route).
+    /// Try the LAN address, then the machine's Tailscale address (away from home, or a guest's only route), then
+    /// its Twingate address.
     async fn attempt_all(self: &Arc<Self>, m: &config::Machine) -> Result<(), ConnError> {
-        let mut addresses: Vec<&str> = Vec::new();
-        for a in [m.host.as_str(), m.ts_host.as_str()] { if !a.is_empty() && !addresses.contains(&a) { addresses.push(a); } }
+        let addresses = m.addresses();
         let mut last = ConnError::plain("No host configured for this machine. Open Settings to add one.");
         for (i, a) in addresses.iter().enumerate() {
             match self.attempt(m, a, i + 1 < addresses.len()).await {
@@ -540,7 +545,7 @@ impl Machine {
         if self.is_online() { return Ok(()); }
         let _guard = self.connecting.lock().await;
         if self.is_online() { return Ok(()); }
-        let m = (self.store.get)().filter(|m| !m.host.is_empty() || !m.ts_host.is_empty()).ok_or("No host configured for this machine. Open Settings to add one.")?;
+        let m = (self.store.get)().filter(config::Machine::has_address).ok_or("No host configured for this machine. Open Settings to add one.")?;
         self.set_status(Status::Connecting, None);
         let err = match self.round(&m).await { Ok(()) => return Ok(()), Err(e) => e };
         // Passphrase-protected keys: ask once, then retry with them unlocked.

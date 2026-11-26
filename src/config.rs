@@ -99,6 +99,9 @@ pub struct Machine {
     pub icon: String,
     #[serde(skip_serializing_if = "String::is_empty", deserialize_with = "lenient_string")]
     pub ts_host: String,
+    /// The machine's address as a Twingate Resource: tried after the LAN and Tailscale addresses.
+    #[serde(skip_serializing_if = "String::is_empty", deserialize_with = "lenient_string")]
+    pub tg_host: String,
     #[serde(skip_serializing_if = "String::is_empty", deserialize_with = "lenient_string")]
     pub jump: String,
     #[serde(skip_serializing_if = "String::is_empty", deserialize_with = "lenient_string")]
@@ -117,6 +120,17 @@ impl Machine {
     pub fn is_local(&self) -> bool { self.kind == "local" }
     pub fn is_wsl(&self) -> bool { self.kind == "wsl" }
     pub fn port_or_default(&self) -> u16 { if self.port == 0 { 22 } else { self.port } }
+    /// The addresses to try, in order: LAN, then Tailscale, then Twingate (blanks and repeats dropped).
+    pub fn addresses(&self) -> Vec<&str> {
+        let mut v: Vec<&str> = Vec::new();
+        for a in [self.host.as_str(), self.ts_host.as_str(), self.tg_host.as_str()] { if !a.is_empty() && !v.contains(&a) { v.push(a); } }
+        v
+    }
+    pub fn has_address(&self) -> bool { !self.addresses().is_empty() }
+    /// The address shown on the machine's card.
+    pub fn shown_address(&self) -> &str { self.addresses().first().copied().unwrap_or_default() }
+    /// Is this address the machine's Twingate one (and not also its LAN or Tailscale address)?
+    pub fn is_twingate_address(&self, a: &str) -> bool { !a.is_empty() && a == self.tg_host && a != self.host && a != self.ts_host }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -370,6 +384,23 @@ mod tests {
         let mut fresh = Config::default();
         fresh.migrate();
         assert_eq!(fresh.presets.iter().filter(|p| p.id == "openclaw").count(), 1);
+    }
+    #[test]
+    fn machine_addresses_are_tried_lan_then_tailscale_then_twingate() {
+        let mut m = Machine { kind: "ssh".into(), ..Default::default() };
+        assert!(!m.has_address());
+        m.tg_host = "spark.internal".into();
+        assert!(m.has_address() && m.is_twingate_address("spark.internal"));
+        assert_eq!(m.shown_address(), "spark.internal");
+        m.host = "10.0.0.5".into();
+        m.ts_host = "spark.tail1.ts.net".into();
+        assert_eq!(m.addresses(), ["10.0.0.5", "spark.tail1.ts.net", "spark.internal"]);
+        m.tg_host = "10.0.0.5".into();
+        assert_eq!(m.addresses(), ["10.0.0.5", "spark.tail1.ts.net"]);
+        assert!(!m.is_twingate_address("10.0.0.5"), "the LAN address is not a Twingate route");
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["tgHost"], "10.0.0.5");
+        assert_eq!(serde_json::from_value::<Machine>(v).unwrap(), m);
     }
     #[test]
     fn electron_era_config_round_trips_with_unknown_keys() {

@@ -140,11 +140,11 @@ impl App {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     ui.horizontal(|ui| { ui.label(RichText::new(&m.name).strong()); dot(ui, status); });
                     ui.horizontal(|ui| {
-                        if status == Status::Online { match st.route { Some("tailscale") => { chip(ui, "TS", OK).on_hover_text("Connected through Tailscale"); } Some("jump") => { chip(ui, "JUMP", OK).on_hover_text("Connected through a jump host"); } _ => {} } }
+                        if status == Status::Online { match st.route { Some("tailscale") => { chip(ui, "TS", OK).on_hover_text("Connected through Tailscale"); } Some("twingate") => { chip(ui, "TG", OK).on_hover_text("Connected through Twingate"); } Some("jump") => { chip(ui, "JUMP", OK).on_hover_text("Connected through a jump host"); } _ => {} } }
                         let sub = if m.is_local() { format!("local · {}", os_label(&m.os)) }
                             else if m.is_wsl() { format!("WSL · {}{}", m.distro, if st.user.is_empty() { String::new() } else { format!(" · {}", st.user) }) }
-                            else if m.host.is_empty() && m.ts_host.is_empty() { "not configured".into() }
-                            else { format!("{}{}", if m.user.is_empty() { String::new() } else { format!("{}@", m.user) }, if m.host.is_empty() { &m.ts_host } else { &m.host }) };
+                            else if !m.has_address() { "not configured".into() }
+                            else { format!("{}{}", if m.user.is_empty() { String::new() } else { format!("{}@", m.user) }, m.shown_address()) };
                         ui.add(egui::Label::new(dim(sub).size(11.0)).truncate());
                     });
                 });
@@ -355,7 +355,7 @@ impl App {
                     });
                     ui.add_space(8.0);
                 }
-                if let Some(u) = self.cfg.machines.iter().find(|m| m.is_ssh() && m.host.is_empty() && m.ts_host.is_empty()) {
+                if let Some(u) = self.cfg.machines.iter().find(|m| m.is_ssh() && !m.has_address()) {
                     egui::Frame::new().fill(tint(WARN, 0.1)).corner_radius(10).inner_margin(10).show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(&u.name).strong());
