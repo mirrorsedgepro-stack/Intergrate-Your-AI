@@ -14,7 +14,7 @@ Download from [Releases](https://github.com/mirrorsedgepro-stack/Intergrate-Your
 | macOS (Apple Silicon / Intel) | `Nexus-x.y.z-mac-arm64.zip` / `…-mac-x64.zip` | Unzip and drag Nexus into Applications. Unsigned: the first time, right-click Nexus in Applications → Open. Nexus tells you when a new version is out. |
 | Linux x86_64 / arm64 (Debian, Ubuntu, DGX OS…) | `Nexus-x.y.z-linux-amd64.deb` / `…-linux-arm64.deb` | `sudo apt install ./Nexus-*.deb`. Other distros: run from source. |
 
-**From source** (any OS, [Rust](https://rustup.rs) 1.85+):
+**From source** (any OS, [Rust](https://rustup.rs) 1.95+):
 
 ```
 cargo run --release
