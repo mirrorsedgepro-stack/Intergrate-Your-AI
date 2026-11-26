@@ -232,9 +232,11 @@ impl Terminal {
     // ---------------------------------------------------------------- input encoding
     /// Text pasted into the terminal (bracketed when the program asked for it).
     pub fn paste_bytes(&self, text: &str, ignore_bracketed: bool) -> Vec<u8> {
+        // Line ends go out as CR either way, as xterm and Windows Terminal do: a bare LF reads as Ctrl+J to some programs.
+        let text = text.replace("\r\n", "\r").replace('\n', "\r");
         if self.mode().contains(TermMode::BRACKETED_PASTE) && !ignore_bracketed {
             format!("\x1b[200~{}\x1b[201~", text.replace(['\x1b', '\x03'], "")).into_bytes()
-        } else { text.replace("\r\n", "\r").replace('\n', "\r").into_bytes() }
+        } else { text.into_bytes() }
     }
 
     /// The bytes a key press sends, or None when the key isn't the terminal's (plain text arrives as text events).
@@ -502,6 +504,7 @@ mod tests {
         assert_eq!(t.paste_bytes("a\nb", false), b"a\rb");
         t.feed(b"\x1b[?2004h");
         assert_eq!(t.paste_bytes("x\x1b[201~rm -rf", false), b"\x1b[200~x[201~rm -rf\x1b[201~");
+        assert_eq!(t.paste_bytes("a\r\nb\nc", false), b"\x1b[200~a\rb\rc\x1b[201~");
         assert_eq!(t.paste_bytes("a\nb", true), b"a\rb", "Git Bash: brackets off");
     }
     #[test]

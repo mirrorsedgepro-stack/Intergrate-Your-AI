@@ -713,6 +713,9 @@ impl App {
             Key::M if c && sh => self.toggle_team(),
             Key::A if c && sh => self.open_fleet(),
             Key::N if c && sh => self.open_palette("in folder "),
+            // The usual terminal copy / paste keys. Without these the terminal would get Ctrl+C (interrupt) and Ctrl+V.
+            Key::C if c && sh && !a => { if self.text_has_focus() { self.ctx.send_viewport_cmd(egui::ViewportCommand::RequestCopy); } else if let Some(id) = self.focused() { self.copy_selection(id); } }
+            Key::V if c && sh && !a => self.ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste),
             Key::Num1 | Key::Num2 | Key::Num3 | Key::Num4 | Key::Num5 | Key::Num6 | Key::Num7 | Key::Num8 | Key::Num9 if c && !sh && !a => {
                 let n = key.name().parse::<usize>().unwrap_or(1);
                 if let Some(id) = self.ordered().get(n - 1).copied() { self.show(id); }
