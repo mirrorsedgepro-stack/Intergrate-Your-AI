@@ -144,9 +144,11 @@ impl TrustStore for Pins {
 }
 struct Rig { machine: Arc<Machine>, pins: Arc<Pins>, asked: Arc<Mutex<Vec<String>>>, statuses: Arc<Mutex<Vec<(Status, Option<&'static str>)>>> }
 fn rig(port: u16, key_file: PathBuf, trust_new_hosts: bool) -> Rig {
+    rig_for(config::Machine { id: "t".into(), name: "Test box".into(), kind: "ssh".into(), os: "linux".into(), host: "127.0.0.1".into(), port, user: "tester".into(), key_path: key_file.to_string_lossy().into_owned(), ..Default::default() }, trust_new_hosts)
+}
+fn rig_for(cfg: config::Machine, trust_new_hosts: bool) -> Rig {
     let (pins, asked, statuses) = (Arc::new(Pins::default()), Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(Vec::new())));
     let (a2, s2) = (asked.clone(), statuses.clone());
-    let cfg = config::Machine { id: "t".into(), name: "Test box".into(), kind: "ssh".into(), os: "linux".into(), host: "127.0.0.1".into(), port, user: "tester".into(), key_path: key_file.to_string_lossy().into_owned(), ..Default::default() };
     let machine = Machine::new(Store {
         get: Box::new(move || Some(cfg.clone())),
         trust: pins.clone(),
@@ -158,6 +160,23 @@ fn rig(port: u16, key_file: PathBuf, trust_new_hosts: bool) -> Rig {
 }
 fn runtime() -> tokio::runtime::Runtime { tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build().unwrap() }
 const T: Duration = Duration::from_secs(20);
+
+/// A machine whose LAN name can't be found is reached at its Twingate address, and the route says so.
+#[test]
+fn falls_back_to_the_twingate_address() {
+    runtime().block_on(async {
+        let srv = start_server("twingate", None).await;
+        let cfg = |tg: &str| config::Machine { id: "t".into(), name: "Test box".into(), kind: "ssh".into(), os: "linux".into(), host: "nexus-no-such-host.invalid".into(), tg_host: tg.into(), port: srv.port, user: "tester".into(), key_path: srv.key_file.to_string_lossy().into_owned(), ..Default::default() };
+        let r = rig_for(cfg("127.0.0.1"), true);
+        r.machine.connect().await.expect("connects through the Twingate address");
+        assert_eq!(r.statuses.lock().unwrap().last().copied(), Some((Status::Online, Some("twingate"))));
+        r.machine.disconnect();
+        // Nothing answers there: the error names Twingate rather than a bare "not found".
+        let r = rig_for(cfg("nexus-no-such-resource.invalid"), true);
+        let e = r.machine.connect().await.unwrap_err();
+        assert!(e.contains("through Twingate"), "{e}");
+    });
+}
 
 #[test]
 fn connect_trust_exec_upload_forward_and_refusals() {

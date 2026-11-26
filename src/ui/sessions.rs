@@ -147,7 +147,7 @@ impl App {
         let m = self.machine(machine_id);
         let plain = !extra.raw && extra.script.is_none() && extra.attach.is_none();
         if stage == 0 {
-            if m.is_ssh() && m.host.is_empty() && m.ts_host.is_empty() { self.open_settings(); self.toast(format!("Add the address of {} first.", m.name), TEXT2, 3800); if let Some(d) = done { d(self, None); } return; }
+            if m.is_ssh() && !m.has_address() { self.open_settings(); self.toast(format!("Add the address of {} first.", m.name), TEXT2, 3800); if let Some(d) = done { d(self, None); } return; }
             if self.is_missing(&m, &self.preset(preset_id)) && !extra.raw && extra.script.is_none() { let hint = self.install_hint(&m, preset_id); self.toast_warn(hint); }
         }
         if stage == 0 && plain && self.check_folder_conflict(machine_id, preset_id, extra.clone(), done.is_none()) { if let Some(d) = done { d(self, None); } return; }
@@ -548,7 +548,7 @@ impl App {
         self.restoring = true;
         let mut created: Vec<Option<u64>> = Vec::new();
         for it in &snap.sessions {
-            let Some(m) = self.cfg.machine(&it.machine_id).cloned().filter(|m| !(m.is_ssh() && m.host.is_empty() && m.ts_host.is_empty())) else { created.push(None); continue };
+            let Some(m) = self.cfg.machine(&it.machine_id).cloned().filter(|m| !(m.is_ssh() && !m.has_address())) else { created.push(None); continue };
             let attach = if resume && m.is_ssh() { it.tmux_name.clone() } else { None };
             created.push(Some(self.make_session(&it.machine_id, &it.preset_id, Extra { cwd: it.cwd.clone(), name: it.name.clone(), attach, ..Default::default() }, false)));
         }
@@ -588,7 +588,7 @@ impl App {
         let c = &self.cfg;
         let data = serde_json::json!({
             "nexus": 1, "exportedAt": chrono::Utc::now().to_rfc3339(), "presets": c.presets, "workspaces": c.workspaces,
-            "machines": c.machines.iter().map(|m| serde_json::json!({ "id": m.id, "name": m.name, "type": m.kind, "host": m.host, "tsHost": m.ts_host, "hostname": self.mst(&m.id).hostname })).collect::<Vec<_>>(),
+            "machines": c.machines.iter().map(|m| serde_json::json!({ "id": m.id, "name": m.name, "type": m.kind, "host": m.host, "tsHost": m.ts_host, "tgHost": m.tg_host, "hostname": self.mst(&m.id).hostname })).collect::<Vec<_>>(),
         });
         match std::fs::write(&path, serde_json::to_string_pretty(&data).unwrap_or_default()) {
             Ok(()) => self.toast_ok(format!("Exported {} workspace{} and {} presets", c.workspaces.len(), if c.workspaces.len() == 1 { "" } else { "s" }, c.presets.len())),
@@ -606,10 +606,10 @@ impl App {
         let s = |v: &serde_json::Value, k: &str| v[k].as_str().unwrap_or_default().to_string();
         let mut map: HashMap<String, String> = HashMap::new();
         for x in data["machines"].as_array().into_iter().flatten() {
-            let (id, kind, host, ts, name) = (s(x, "id"), s(x, "type"), s(x, "host"), s(x, "tsHost"), s(x, "name"));
+            let (id, kind, host, ts, tg, name) = (s(x, "id"), s(x, "type"), s(x, "host"), s(x, "tsHost"), s(x, "tgHost"), s(x, "name"));
             let ms = &self.cfg.machines;
             let hit = ms.iter().find(|m| m.id == id && (m.kind == kind || kind.is_empty()))
-                .or_else(|| ms.iter().find(|m| !host.is_empty() && (m.host == host || m.ts_host == host || (!ts.is_empty() && m.ts_host == ts))))
+                .or_else(|| ms.iter().find(|m| !host.is_empty() && (m.host == host || m.ts_host == host || (!ts.is_empty() && m.ts_host == ts))).or_else(|| ms.iter().find(|m| !tg.is_empty() && m.tg_host == tg)))
                 .or_else(|| ms.iter().find(|m| !name.is_empty() && m.name == name))
                 .or_else(|| ms.iter().find(|m| kind == "local" && m.is_local()));
             if let Some(m) = hit { map.insert(id, m.id.clone()); }
@@ -669,7 +669,7 @@ impl App {
     }
     pub fn refresh_machine(&mut self, id: &str) {
         let m = self.machine(id);
-        if !(m.is_wsl() || (m.is_ssh() && (!m.host.is_empty() || !m.ts_host.is_empty()))) || self.cfg.machine(id).is_none() { return; }
+        if !(m.is_wsl() || (m.is_ssh() && m.has_address())) || self.cfg.machine(id).is_none() { return; }
         let (be, mid) = (self.be.clone(), id.to_string());
         let mid2 = mid.clone();
         self.be.run(async move { be.probe(&mid).await }, move |app, r| {

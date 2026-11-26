@@ -1,7 +1,7 @@
 # Nexus
 
 One terminal for Claude Code, the Antigravity CLI (`agy`), OpenClaw and shells: on your own computer (Windows, macOS, Linux,
-or a WSL distro) and on any Linux machines you can SSH into (a GPU workstation, a home server, a cloud VM, an NVIDIA DGX…), directly or over Tailscale, with team chat so several people
+or a WSL distro) and on any Linux machines you can SSH into (a GPU workstation, a home server, a cloud VM, an NVIDIA DGX…), directly, over Tailscale or through Twingate, with team chat so several people
 can share the machines without stepping on each other.
 
 ## Install
@@ -71,6 +71,17 @@ The machine needs `sshd` running (`sudo apt install openssh-server`).
 | **Resizable splits** | Drag the divider between panes; double-click it to reset. |
 | **Send last reply** | Ctrl+Shift+S (or the ➤ button on an agent pane) puts the agent's latest answer into the broadcast composer, aimed at your other agents, ready to edit and send. |
 | **Broadcast** | Ctrl+Shift+Enter: write one prompt, send it to several sessions. |
+
+## Reaching your machines through Twingate
+
+If you use [Twingate](https://www.twingate.com) instead of (or as well as) Tailscale, give each SSH machine a
+**Twingate address** in Settings → Machines: the address of the Resource that covers it in your Twingate network
+(for example `spark1.internal` or `10.0.0.5`). Nexus tries the LAN address first, then the Tailscale address, then the
+Twingate one, and shows a **TG** badge on the card when it is connected that way.
+
+The Twingate client on this computer has to be installed and connected, and the Resource has to allow TCP port 22 (or the
+machine's SSH port). Login works as it does on the LAN: your SSH key, "Set up SSH key", or ssh-agent. Nexus does not
+change anything in your Twingate network; the Share panel and invite codes are Tailscale only.
 
 ## Sharing your machines over Tailscale
 

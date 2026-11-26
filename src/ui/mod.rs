@@ -362,7 +362,7 @@ impl App {
             if let Some(snap) = self.cfg.last_session.clone() { self.open_layout(&snap, true); }
         }
         for m in self.cfg.machines.clone() {
-            if (m.is_ssh() && (!m.host.is_empty() || !m.ts_host.is_empty())) || m.is_wsl() { self.connect_machine(&m.id, false); }
+            if (m.is_ssh() && m.has_address()) || m.is_wsl() { self.connect_machine(&m.id, false); }
         }
         self.team.status = self.cfg.collab.status.clone();
         self.init_team();
