@@ -1,6 +1,6 @@
 [package]
 name = "nexus-terminal"
-version = "2.0.3"
+version = "2.0.4"
 edition = "2021"
 rust-version = "1.95"
 description = "One terminal to orchestrate Claude, Antigravity, OpenClaw and shells across your machines (Windows, macOS, Linux, WSL)"
@@ -20,7 +20,9 @@ name = "nexus-mcp"
 path = "src/bin/nexus-mcp.rs"
 
 [dependencies]
-eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+# "clipboard" is what connects copy and paste to the system clipboard: without it egui keeps a private one that
+# only works inside Nexus.
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "x11", "wayland", "clipboard"] }
 # Colour glyphs (emoji) in the terminal and UI text.
 epaint = { version = "0.37", default-features = false, features = ["color_fonts"] }
 egui_extras = { version = "0.37", default-features = false, features = ["svg", "image"] }
